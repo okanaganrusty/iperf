@@ -826,9 +826,9 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     }
 
     /* Blocking mode: wait for data to arrive */
-    /* For now, do a few more attempts to recv packets */
+    /* Wait up to 10 seconds for data (100000 * 100us = 10s) */
     int attempts = 0;
-    while (attempts < 1000 && conn->rx_buffer_offset == 0) {
+    while (attempts < 100000 && conn->rx_buffer_offset == 0) {
         dpdk_process_packets();
 
         /* Try to dequeue and process packets */
