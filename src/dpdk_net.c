@@ -519,10 +519,20 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
         g_dpdk_state->connections[idx] = new_conn;
 
         /* First, enqueue the initial packet (used to extract remote addr) to the new connection */
-        if (rte_ring_enqueue(new_conn->rx_ring, mbuf) < 0) {
-            if (g_dpdk_state->debug) {
-                printf("DPDK accept: failed to enqueue first packet to new connection\n");
+        /* But only if it has payload - skip SYN packets with no data */
+        uint8_t tcp_hdr_len = (tcp_hdr->data_off >> 4) * 4;
+        size_t total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + tcp_hdr_len;
+        size_t payload_len = rte_pktmbuf_pkt_len(mbuf) - total_hdr_len;
+
+        if (payload_len > 0) {
+            if (rte_ring_enqueue(new_conn->rx_ring, mbuf) < 0) {
+                if (g_dpdk_state->debug) {
+                    printf("DPDK accept: failed to enqueue first packet to new connection\n");
+                }
+                rte_pktmbuf_free(mbuf);
             }
+        } else {
+            /* No payload, just free it */
             rte_pktmbuf_free(mbuf);
         }
 
