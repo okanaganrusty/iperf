@@ -35,7 +35,7 @@
 #define DPDK_NUM_MBUFS 65535
 #define DPDK_MBUF_CACHE_SIZE 512
 #define DPDK_MAX_CONNECTIONS 1024
-#define DPDK_RX_BUFFER_SIZE 1048576
+#define DPDK_RX_BUFFER_SIZE 8388608  /* 8 MB - ample for flow-controlled buffering */
 
 /* Connection states */
 #define DPDK_CONN_STATE_CLOSED 0
@@ -71,7 +71,10 @@ struct dpdk_connection {
     uint32_t ack_num;                /* Acknowledgment number */
     uint32_t last_ack_sent;          /* Last ACK value transmitted */
     uint64_t last_ack_tsc;           /* TSC at last ACK transmission */
-    uint16_t window_size;            /* Window size */
+    uint16_t window_size;            /* Window size (after scaling) */
+    uint8_t wscale_local;            /* Local window scale factor (RFC 1323) */
+    uint8_t wscale_remote;           /* Remote window scale factor (RFC 1323) */
+    uint32_t rwnd_available;         /* Available receive window (bytes) */
 
     /* Transmit and receive buffers */
     struct rte_ring *rx_ring;        /* Received packets */

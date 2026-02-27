@@ -471,7 +471,16 @@ static struct dpdk_connection *dpdk_alloc_connection(int fd)
 
     conn->fd = fd;
     conn->state = DPDK_CONN_STATE_CLOSED;
-    conn->window_size = 65535;
+
+    /* Initialize TCP window control (RFC 1323) */
+    conn->wscale_local = 7;  /* Support up to 2^7 * 64KB = 8MB window */
+    conn->wscale_remote = 0; /* Will negotiate during SYN */
+    conn->rwnd_available = DPDK_RX_BUFFER_SIZE;  /* Full buffer available initially */
+
+    /* Window size sent to peer (advertised window / 2^wscale) */
+    uint32_t max_window = DPDK_RX_BUFFER_SIZE >> conn->wscale_local;
+    conn->window_size = (max_window > 65535) ? 65535 : max_window;
+
     conn->port_id = g_dpdk_state->port_id;
 
     /* Create RX ring */
@@ -1070,6 +1079,13 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         }
         conn->rx_buffer_offset -= copied;
 
+        /* Restore window space as data is consumed (flow control) */
+        if (conn->rwnd_available + copied <= (uint32_t)DPDK_RX_BUFFER_SIZE) {
+            conn->rwnd_available += copied;
+        } else {
+            conn->rwnd_available = DPDK_RX_BUFFER_SIZE;
+        }
+
         return copied;
     }
 
@@ -1142,6 +1158,13 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
                     conn->rx_buffer_offset - copied);
         }
         conn->rx_buffer_offset -= copied;
+
+        /* Restore window space as data is consumed (flow control) */
+        if (conn->rwnd_available + copied <= (uint32_t)DPDK_RX_BUFFER_SIZE) {
+            conn->rwnd_available += copied;
+        } else {
+            conn->rwnd_available = DPDK_RX_BUFFER_SIZE;
+        }
 
         return copied;
     }
@@ -1465,42 +1488,80 @@ int dpdk_rx_burst(uint16_t port_id)
                 if (protocol == DPDK_PROTO_TCP && payload_tcp_hdr) {
                     uint32_t pkt_seq = rte_be_to_cpu_32(payload_tcp_hdr->sent_seq);
                     uint8_t tcp_flags = payload_tcp_hdr->tcp_flags;
-                    int force_ack = 0;
+                    int should_ack = 0;
                     int payload_buffered = 0;
 
-                    /* Check control flags */
-                    if (tcp_flags & DPDK_TCP_FLAG_SYN) {
-                        force_ack = 1;
-                    }
-                    if (tcp_flags & DPDK_TCP_FLAG_FIN) {
-                        force_ack = 1;
-                    }
-                    if (tcp_flags & DPDK_TCP_FLAG_RST) {
-                        force_ack = 1;
-                    }
+                    /* Check for control packets that always need ACKing (no payload) */
+                    int is_control = (tcp_flags & (DPDK_TCP_FLAG_SYN | DPDK_TCP_FLAG_FIN | DPDK_TCP_FLAG_RST)) != 0;
 
-                    /* Always track and ACK received packets for flow control */
-                    /* (This maintains TCP window semantics even under buffer pressure) */
-                    if (payload_len > 0) {
-                        uint32_t candidate_ack = pkt_seq + (uint32_t)payload_len;
-                        if ((int32_t)(candidate_ack - conn->ack_num) > 0) {
-                            conn->ack_num = candidate_ack;
+                    /* Parse TCP options for SYN packets (window scaling negotiation) */
+                    if (is_control && (tcp_flags & DPDK_TCP_FLAG_SYN)) {
+                        uint8_t data_off = (payload_tcp_hdr->data_off >> 4);  /* Header length in 32-bit words */
+                        uint8_t hdr_len = data_off * 4;
+
+                        if (hdr_len > 20) {
+                            /* Has options */
+                            uint8_t *options = (uint8_t *)payload_tcp_hdr + 20;
+                            uint8_t options_len = hdr_len - 20;
+                            uint8_t i = 0;
+
+                            while (i < options_len) {
+                                uint8_t kind = options[i];
+                                if (kind == 0 || kind == 1) {
+                                    i++;
+                                    continue;  /* EOL or NOP */
+                                }
+
+                                if (i + 1 >= options_len) break;
+                                uint8_t len = options[i + 1];
+
+                                if (kind == 3 && len == 3) {
+                                    /* Window Scale option (RFC 1323) */
+                                    conn->wscale_remote = options[i + 2] & 0x0F;
+                                    if (conn->wscale_remote > 14) {
+                                        conn->wscale_remote = 14;  /* Cap at 14 */
+                                    }
+                                }
+                                i += len;
+                            }
                         }
                     }
 
-                    /* Handle control flags that also advance ACK number */
-                    if (tcp_flags & (DPDK_TCP_FLAG_SYN | DPDK_TCP_FLAG_FIN)) {
+                    if (is_control) {
+                        /* ACK control packets regardless of buffer status */
                         uint32_t candidate_ack = pkt_seq + 1;
                         if (payload_len > 0) {
                             candidate_ack = pkt_seq + (uint32_t)payload_len + 1;
                         }
                         if ((int32_t)(candidate_ack - conn->ack_num) > 0) {
                             conn->ack_num = candidate_ack;
+                            should_ack = 1;
                         }
+                    } else if (payload_len > 0) {
+                        /* Data packet: only ACK if we can buffer it (proper TCP flow control) */
+                        if (conn->rx_buffer_offset + payload_len <= conn->rx_buffer_size) {
+                            /* We have space - buffer the data and ACK it */
+                            rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
+                            conn->rx_buffer_offset += payload_len;
+                            /* Reduce advertised window (flow control) */
+                            if (conn->rwnd_available >= payload_len) {
+                                conn->rwnd_available -= payload_len;
+                            } else {
+                                conn->rwnd_available = 0;
+                            }
+                            payload_buffered = 1;
+
+                            uint32_t candidate_ack = pkt_seq + (uint32_t)payload_len;
+                            if ((int32_t)(candidate_ack - conn->ack_num) > 0) {
+                                conn->ack_num = candidate_ack;
+                                should_ack = 1;
+                            }
+                        }
+                        /* else: buffer full, drop without ACKing - client will retransmit naturally */
                     }
 
-                    /* Send ACK if we've advanced the sequence (flow control is critical!) */
-                    if ((int32_t)(conn->ack_num - conn->last_ack_sent) > 0) {
+                    /* Send ACK if needed (and enough time/data has accumulated) */
+                    if (should_ack && (int32_t)(conn->ack_num - conn->last_ack_sent) > 0) {
                         uint64_t now_tsc = rte_get_tsc_cycles();
                         uint64_t ack_interval_tsc = rte_get_tsc_hz() / 5000; /* ~200us */
                         if (ack_interval_tsc == 0) {
@@ -1508,9 +1569,8 @@ int dpdk_rx_burst(uint16_t port_id)
                         }
 
                         uint32_t ack_delta = conn->ack_num - conn->last_ack_sent;
-                        int this_force_ack = (tcp_flags & (DPDK_TCP_FLAG_SYN | DPDK_TCP_FLAG_FIN | DPDK_TCP_FLAG_RST)) != 0;
 
-                        if (this_force_ack ||
+                        if (is_control ||
                             ack_delta >= (16U * 1460U) ||
                             conn->last_ack_tsc == 0 ||
                             (now_tsc - conn->last_ack_tsc) >= ack_interval_tsc) {
@@ -1520,20 +1580,14 @@ int dpdk_rx_burst(uint16_t port_id)
                         }
                     }
 
-                    /* Try to buffer payload (if it fails, sender will retransmit) */
-                    if (payload_len > 0 &&
-                        conn->rx_buffer_offset + payload_len <= conn->rx_buffer_size) {
-                        rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
-                        conn->rx_buffer_offset += payload_len;
+                    /* Finalize packet handling */
+                    if (payload_buffered) {
                         rte_pktmbuf_free(bufs[i]);
-                    } else if (payload_len == 0) {
+                    } else if (payload_len == 0 || is_control) {
                         rte_pktmbuf_free(bufs[i]);
                     } else {
-                        /* Buffer full, try rx_ring as fallback */
-                        if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
-                            /* Both full - drop and let TCP retransmit (we already ACKed) */
-                            rte_pktmbuf_free(bufs[i]);
-                        }
+                        /* Data packet but buffer full - drop without ACK (forces retransmit) */
+                        rte_pktmbuf_free(bufs[i]);
                     }
                 } else if (payload_len > 0 &&
                            conn->rx_buffer_offset + payload_len <= conn->rx_buffer_size) {
@@ -1805,9 +1859,21 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     tcp_hdr->dst_port = dst_port;
     tcp_hdr->sent_seq = rte_cpu_to_be_32(conn->seq_num);
     tcp_hdr->recv_ack = rte_cpu_to_be_32(conn->ack_num);
-    tcp_hdr->data_off = 0x50; /* 20 byte header */
+
+    /* Set TCP header length - 20 bytes base (0x50 = 5 * 4 bytes) */
+    /* We'll set options later if needed */
+    tcp_hdr->data_off = 0x50;
     tcp_hdr->tcp_flags = flags;
-    tcp_hdr->rx_win = rte_cpu_to_be_16(conn->window_size);
+
+    /* Update and advertise window based on available buffer space */
+    /* window_size is advertised window / 2^wscale_remote */
+    uint32_t scaled_window = conn->rwnd_available >> conn->wscale_remote;
+    if (scaled_window > 65535) {
+        scaled_window = 65535;  /* Max for 16-bit field */
+    }
+    tcp_hdr->rx_win = rte_cpu_to_be_16((uint16_t)scaled_window);
+
+    tcp_hdr->cksum = 0;
     tcp_hdr->cksum = 0;
     tcp_hdr->tcp_urp = 0;
 
