@@ -120,7 +120,7 @@ iperf_create_streams(struct iperf_test *test, int sender)
             if (!sender && test->mode == BIDIRECTIONAL)
                 test->bind_port += test->num_streams;
         }
-        s = test->protocol->connect(test);
+        s = test->protocol->proto_connect(test);
         test->bind_port = orig_bind_port;
         if (s < 0)
             return -1;
@@ -400,7 +400,7 @@ iperf_handle_message_client(struct iperf_test *test)
                 return -1;
             }
             errno = ntohl(err);
-            if (errno > 0) {    
+            if (errno > 0) {
                 iperf_err(test, "SERVER ERROR - %s, errno: %s", iperf_strerror(i_errno), strerror(errno));
             } else {
                 iperf_err(test, "SERVER ERROR - %s", iperf_strerror(i_errno));
@@ -873,7 +873,7 @@ iperf_run_client(struct iperf_test * test)
                 errno = rc;
                 iperf_err(test, "cleanup_and_fail in pthread_cancel - %s", iperf_strerror(i_errno));
             }
-            rc = pthread_join(sp->thr, NULL); 
+            rc = pthread_join(sp->thr, NULL);
             if (rc != 0 && rc != ESRCH) {
                 i_errno = IEPTHREADJOIN;
                 errno = rc;

@@ -271,9 +271,9 @@ struct iperf_stream
 struct protocol {
     int       id;
     char      *name;
-    int       (*accept)(struct iperf_test *);
-    int       (*listen)(struct iperf_test *);
-    int       (*connect)(struct iperf_test *);
+    int       (*proto_accept)(struct iperf_test *);
+    int       (*proto_listen)(struct iperf_test *);
+    int       (*proto_connect)(struct iperf_test *);
     int       (*send)(struct iperf_stream *);
     int       (*recv)(struct iperf_stream *);
     int       (*init)(struct iperf_test *);

@@ -29,20 +29,13 @@
 #define fcntl(sockfd, cmd, ...) dpdk_fcntl(sockfd, cmd, ##__VA_ARGS__)
 
 /*
- * For listen, accept, connect: use inline functions instead of macros
- * to avoid conflicts with protocol function pointer members
+ * For listen, accept, connect: use macros like other socket functions
+ * Function-like macros only expand when followed by '(', so they won't
+ * interfere with protocol struct members like 'protocol->listen'
  */
-static inline int listen(int sockfd, int backlog) {
-    return dpdk_listen(sockfd, backlog);
-}
-
-static inline int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    return dpdk_accept(sockfd, addr, addrlen);
-}
-
-static inline int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-    return dpdk_connect(sockfd, addr, addrlen);
-}
+#define listen(sockfd, backlog) dpdk_listen(sockfd, backlog)
+#define accept(sockfd, addr, addrlen) dpdk_accept(sockfd, addr, addrlen)
+#define connect(sockfd, addr, addrlen) dpdk_connect(sockfd, addr, addrlen)
 
 /* Special handling for read/write as they're also used for files */
 #define socket_read(sockfd, buf, count) dpdk_recv(sockfd, buf, count, 0)

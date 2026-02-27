@@ -2385,7 +2385,7 @@ iperf_exchange_parameters(struct iperf_test *test)
         }
 #endif //HAVE_SSL
 
-        if ((s = test->protocol->listen(test)) < 0) {
+        if ((s = test->protocol->proto_listen(test)) < 0) {
             return -1;
         }
 
@@ -3344,9 +3344,9 @@ iperf_defaults(struct iperf_test *testp)
 
     tcp->id = Ptcp;
     tcp->name = "TCP";
-    tcp->accept = iperf_tcp_accept;
-    tcp->listen = iperf_tcp_listen;
-    tcp->connect = iperf_tcp_connect;
+    tcp->proto_accept = iperf_tcp_accept;
+    tcp->proto_listen = iperf_tcp_listen;
+    tcp->proto_connect = iperf_tcp_connect;
     tcp->send = iperf_tcp_send;
     tcp->recv = iperf_tcp_recv;
     tcp->init = NULL;
@@ -3360,9 +3360,9 @@ iperf_defaults(struct iperf_test *testp)
 
     udp->id = Pudp;
     udp->name = "UDP";
-    udp->accept = iperf_udp_accept;
-    udp->listen = iperf_udp_listen;
-    udp->connect = iperf_udp_connect;
+    udp->proto_accept = iperf_udp_accept;
+    udp->proto_listen = iperf_udp_listen;
+    udp->proto_connect = iperf_udp_connect;
     udp->send = iperf_udp_send;
     udp->recv = iperf_udp_recv;
     udp->init = iperf_udp_init;
@@ -3380,9 +3380,9 @@ iperf_defaults(struct iperf_test *testp)
 
     sctp->id = Psctp;
     sctp->name = "SCTP";
-    sctp->accept = iperf_sctp_accept;
-    sctp->listen = iperf_sctp_listen;
-    sctp->connect = iperf_sctp_connect;
+    sctp->proto_accept = iperf_sctp_accept;
+    sctp->proto_listen = iperf_sctp_listen;
+    sctp->proto_connect = iperf_sctp_connect;
     sctp->send = iperf_sctp_send;
     sctp->recv = iperf_sctp_recv;
     sctp->init = iperf_sctp_init;
