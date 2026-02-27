@@ -522,6 +522,8 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 int dpdk_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
     struct dpdk_connection *conn;
+    struct sockaddr_in *local_sin;
+    static uint16_t next_ephemeral_port = 32768;
 
     conn = dpdk_get_connection(sockfd);
     if (!conn) {
@@ -532,6 +534,27 @@ int dpdk_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
     memcpy(&conn->remote_addr, addr, addrlen);
     conn->remote_addr_len = addrlen;
 
+    /* Auto-assign local address if not already bound */
+    if (conn->local_addr_len == 0 && addr->sa_family == AF_INET) {
+        local_sin = (struct sockaddr_in *)&conn->local_addr;
+        local_sin->sin_family = AF_INET;
+        local_sin->sin_addr.s_addr = g_dpdk_state->ipv4_addr;
+        local_sin->sin_port = rte_cpu_to_be_16(next_ephemeral_port++);
+        conn->local_addr_len = sizeof(struct sockaddr_in);
+
+        if (g_dpdk_state->debug) {
+            char local_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &local_sin->sin_addr, local_ip, INET_ADDRSTRLEN);
+            printf("DPDK auto-assigned local address: %s:%u\n",
+                   local_ip, rte_be_to_cpu_16(local_sin->sin_port));
+        }
+
+        /* Wrap around if we exceed the ephemeral port range */
+        if (next_ephemeral_port > 60999) {
+            next_ephemeral_port = 32768;
+        }
+    }
+
     if (conn->protocol == DPDK_PROTO_TCP) {
         /* Send SYN packet */
         conn->state = DPDK_CONN_STATE_SYN_SENT;
@@ -540,6 +563,14 @@ int dpdk_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
         /* In a real implementation, wait for SYN-ACK */
         conn->state = DPDK_CONN_STATE_ESTABLISHED;
         conn->connected = 1;
+        
+        if (g_dpdk_state->debug) {
+            char remote_ip[INET_ADDRSTRLEN];
+            struct sockaddr_in *remote_sin = (struct sockaddr_in *)&conn->remote_addr;
+            inet_ntop(AF_INET, &remote_sin->sin_addr, remote_ip, INET_ADDRSTRLEN);
+            printf("DPDK connect established: sockfd=%d remote=%s:%u state=%d\n",
+                   sockfd, remote_ip, rte_be_to_cpu_16(remote_sin->sin_port), conn->state);
+        }
     } else {
         /* UDP - just mark as connected */
         conn->connected = 1;
@@ -556,9 +587,25 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
     int ret;
 
     conn = dpdk_get_connection(sockfd);
-    if (!conn || !conn->connected) {
+    if (!conn) {
+        if (g_dpdk_state && g_dpdk_state->debug) {
+            printf("DPDK send: Bad file descriptor %d (connection not found)\n", sockfd);
+        }
+        errno = EBADF;
+        return -1;
+    }
+    
+    if (!conn->connected) {
+        if (g_dpdk_state && g_dpdk_state->debug) {
+            printf("DPDK send: Socket %d not connected (state=%d)\n", sockfd, conn->state);
+        }
         errno = ENOTCONN;
         return -1;
+    }
+
+    if (g_dpdk_state && g_dpdk_state->debug) {
+        printf("DPDK send: sockfd=%d len=%zu connected=%d state=%d\n", 
+               sockfd, len, conn->connected, conn->state);
     }
 
     /* Allocate mbuf */
