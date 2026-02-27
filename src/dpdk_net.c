@@ -1629,7 +1629,15 @@ int dpdk_tx_burst(uint16_t port_id)
     static int last_conn_idx = 0;  /* Round-robin starting point */
     int conn_checked = 0;
 
-    /* Collect packets from all connections in round-robin fashion with fair limit per connection */
+    /* First, add any pending packets from previous burst (NIC couldn't accept) */
+    if (g_dpdk_state->tx_pending_count > 0) {
+        for (i = 0; i < g_dpdk_state->tx_pending_count && i < DPDK_MAX_TX_BURST; i++) {
+            bufs[nb_tx++] = g_dpdk_state->tx_pending[i];
+        }
+        g_dpdk_state->tx_pending_count = 0;  /* Will repopulate if still can't send */
+    }
+
+    /* Collect new packets from all connections in round-robin fashion with fair limit per connection */
     idx = last_conn_idx;
     while (conn_checked < DPDK_MAX_CONNECTIONS && nb_tx < DPDK_MAX_TX_BURST) {
         struct dpdk_connection *conn = g_dpdk_state->connections[idx];
@@ -1680,9 +1688,15 @@ int dpdk_tx_burst(uint16_t port_id)
             g_dpdk_state->tx_bytes += rte_pktmbuf_pkt_len(bufs[i]);
         }
 
-        /* Free unsent packets */
-        for (i = sent; i < nb_tx; i++) {
-            rte_pktmbuf_free(bufs[i]);
+        /* Save unsent packets to pending buffer for next burst (instead of freeing!) */
+        if (sent < nb_tx) {
+            for (i = sent; i < nb_tx && (i - sent) < DPDK_MAX_TX_BURST; i++) {
+                g_dpdk_state->tx_pending[g_dpdk_state->tx_pending_count++] = bufs[i];
+            }
+            /* Free any that don't fit in pending buffer (overflow protection) */
+            for (; i < nb_tx; i++) {
+                rte_pktmbuf_free(bufs[i]);
+            }
         }
 
         return sent;

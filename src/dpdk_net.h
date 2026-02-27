@@ -133,6 +133,10 @@ struct dpdk_state {
     int fast_path_tx_started;
     pthread_t rx_thread;
     pthread_t tx_thread;
+
+    /* TX pending buffer for packets NIC couldn't accept */
+    struct rte_mbuf *tx_pending[DPDK_MAX_TX_BURST];
+    uint16_t tx_pending_count;
 };
 
 /* DPDK initialization and cleanup */
