@@ -724,8 +724,8 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
     /* Trigger TX burst */
     dpdk_tx_burst(conn->port_id);
 
-    /* Delay to allow packet transmission and remote RX processing */
-    usleep(5000); /* 5ms delay */
+    /* Small delay to allow packet transmission */
+    usleep(500); /* 500μs delay */
 
     return len;
 }

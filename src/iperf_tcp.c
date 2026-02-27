@@ -607,8 +607,8 @@ iperf_tcp_connect(struct iperf_test *test)
 
     freeaddrinfo(server_res);
 
-    /* Give server time to process connection before sending cookie */
-    usleep(10000); /* 10ms delay */
+    /* Brief delay to allow connection to stabilize */
+    usleep(1000); /* 1ms delay */
 
     /* Send cookie for verification */
     if (Nwrite(s, test->cookie, COOKIE_SIZE, Ptcp) < 0) {
