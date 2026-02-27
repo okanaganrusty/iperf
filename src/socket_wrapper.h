@@ -13,11 +13,14 @@
 
 #include "dpdk_net.h"
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /* Forward declarations for wrapper functions */
 ssize_t dpdk_wrapped_read(int fd, void *buf, size_t count);
 ssize_t dpdk_wrapped_write(int fd, const void *buf, size_t count);
+int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
 
 /* Replace standard socket functions with DPDK equivalents */
 #define socket(domain, type, protocol) dpdk_socket(domain, type, protocol)
@@ -45,6 +48,10 @@ ssize_t dpdk_wrapped_write(int fd, const void *buf, size_t count);
 /* Wrap read/write to detect DPDK sockets */
 #define read(fd, buf, count) dpdk_wrapped_read(fd, buf, count)
 #define write(fd, buf, count) dpdk_wrapped_write(fd, buf, count)
+
+/* Wrap select to handle DPDK sockets */
+#define select(nfds, readfds, writefds, exceptfds, timeout) \
+    dpdk_wrapped_select(nfds, readfds, writefds, exceptfds, timeout)
 
 #endif /* HAVE_DPDK */
 

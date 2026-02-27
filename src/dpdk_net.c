@@ -13,6 +13,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <arpa/inet.h>
 
 #include <rte_cycles.h>
@@ -1278,4 +1280,126 @@ ssize_t dpdk_wrapped_write(int fd, const void *buf, size_t count)
 
     /* Not a DPDK socket, use real system call */
     return write(fd, buf, count);
+}
+
+/* Wrapper for select() that handles DPDK sockets */
+int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+{
+    fd_set dpdk_readfds, dpdk_writefds, regular_readfds, regular_writefds;
+    int fd, regular_nfds = 0;
+    int dpdk_ready = 0, regular_ready = 0;
+    int has_dpdk_sockets = 0, has_regular_sockets = 0;
+    struct timeval short_timeout = {0, 1000}; /* 1ms for DPDK polling */
+
+    if (!g_dpdk_state) {
+        /* No DPDK initialized, use regular select */
+        return select(nfds, readfds, writefds, exceptfds, timeout);
+    }
+
+    /* Initialize fd_sets */
+    FD_ZERO(&dpdk_readfds);
+    FD_ZERO(&dpdk_writefds);
+    FD_ZERO(&regular_readfds);
+    FD_ZERO(&regular_writefds);
+
+    /* Separate DPDK and regular sockets */
+    for (fd = 0; fd < nfds; fd++) {
+        struct dpdk_connection *conn = NULL;
+        int is_dpdk = 0;
+
+        if (fd >= 100) {
+            conn = dpdk_get_connection(fd);
+            is_dpdk = (conn != NULL);
+        }
+
+        if (is_dpdk) {
+            has_dpdk_sockets = 1;
+            if (readfds && FD_ISSET(fd, readfds)) {
+                FD_SET(fd, &dpdk_readfds);
+            }
+            if (writefds && FD_ISSET(fd, writefds)) {
+                FD_SET(fd, &dpdk_writefds);
+            }
+        } else {
+            if (readfds && FD_ISSET(fd, readfds)) {
+                FD_SET(fd, &regular_readfds);
+                has_regular_sockets = 1;
+                if (fd >= regular_nfds) regular_nfds = fd + 1;
+            }
+            if (writefds && FD_ISSET(fd, writefds)) {
+                FD_SET(fd, &regular_writefds);
+                has_regular_sockets = 1;
+                if (fd >= regular_nfds) regular_nfds = fd + 1;
+            }
+        }
+    }
+
+    /* Process DPDK packets if we have DPDK sockets */
+    if (has_dpdk_sockets) {
+        dpdk_process_packets();
+
+        /* Check DPDK sockets for readiness */
+        for (fd = 100; fd < nfds; fd++) {
+            struct dpdk_connection *conn = dpdk_get_connection(fd);
+            if (!conn) continue;
+
+            /* Check if socket is readable (has data in rx_ring or rx_buffer) */
+            if (FD_ISSET(fd, &dpdk_readfds)) {
+                unsigned int count = 0;
+                if (conn->rx_ring) {
+                    count = rte_ring_count(conn->rx_ring);
+                }
+                if (count > 0 || conn->rx_buffer_offset > 0) {
+                    dpdk_ready++;
+                    if (readfds) FD_SET(fd, readfds);
+                } else {
+                    if (readfds) FD_CLR(fd, readfds);
+                }
+            }
+
+            /* Check if socket is writable (connected and tx_ring not full) */
+            if (FD_ISSET(fd, &dpdk_writefds)) {
+                if (conn->connected) {
+                    dpdk_ready++;
+                    if (writefds) FD_SET(fd, writefds);
+                } else {
+                    if (writefds) FD_CLR(fd, writefds);
+                }
+            }
+        }
+    }
+
+    /* Handle regular sockets with select() if any */
+    if (has_regular_sockets) {
+        /* Use a short timeout if we have DPDK sockets to check */
+        struct timeval *select_timeout = has_dpdk_sockets ? &short_timeout : timeout;
+        regular_ready = select(regular_nfds,
+                              has_regular_sockets ? &regular_readfds : NULL,
+                              has_regular_sockets ? &regular_writefds : NULL,
+                              exceptfds,
+                              select_timeout);
+
+        if (regular_ready < 0) {
+            return regular_ready; /* Error from select */
+        }
+
+        /* Merge regular socket results back */
+        if (regular_ready > 0) {
+            for (fd = 0; fd < regular_nfds; fd++) {
+                if (readfds && FD_ISSET(fd, &regular_readfds)) {
+                    FD_SET(fd, readfds);
+                }
+                if (writefds && FD_ISSET(fd, &regular_writefds)) {
+                    FD_SET(fd, writefds);
+                }
+            }
+        }
+    }
+
+    if (g_dpdk_state->debug && (dpdk_ready > 0 || regular_ready > 0)) {
+        printf("DPDK select: dpdk_ready=%d regular_ready=%d total=%d\\n",
+               dpdk_ready, regular_ready, dpdk_ready + regular_ready);
+    }
+
+    return dpdk_ready + regular_ready;
 }
