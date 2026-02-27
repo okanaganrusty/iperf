@@ -1685,6 +1685,9 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     tcp_hdr->cksum = 0;
     tcp_hdr->tcp_urp = 0;
 
+    /* Compute TCP checksum over IPv4 pseudo-header + TCP segment */
+    tcp_hdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr, tcp_hdr);
+
     conn->seq_num += len;
 
     return 0;
@@ -1747,6 +1750,9 @@ int dpdk_create_udp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     udp_hdr->dst_port = dst_port;
     udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(*udp_hdr) + len);
     udp_hdr->dgram_cksum = 0;
+
+    /* Compute UDP checksum over IPv4 pseudo-header + UDP datagram */
+    udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr, udp_hdr);
 
     return 0;
 }
