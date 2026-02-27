@@ -280,7 +280,7 @@ static struct dpdk_connection *dpdk_alloc_connection(int fd)
 
     /* Create RX ring */
     snprintf(ring_name, sizeof(ring_name), "rx_ring_%d", fd);
-    conn->rx_ring = rte_ring_create(ring_name, 1024, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    conn->rx_ring = rte_ring_create(ring_name, DPDK_RX_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
     if (!conn->rx_ring) {
         free(conn);
         return NULL;
@@ -288,7 +288,7 @@ static struct dpdk_connection *dpdk_alloc_connection(int fd)
 
     /* Create TX ring */
     snprintf(ring_name, sizeof(ring_name), "tx_ring_%d", fd);
-    conn->tx_ring = rte_ring_create(ring_name, 1024, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    conn->tx_ring = rte_ring_create(ring_name, DPDK_TX_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
     if (!conn->tx_ring) {
         rte_ring_free(conn->rx_ring);
         free(conn);
@@ -1188,11 +1188,38 @@ int dpdk_rx_burst(uint16_t port_id)
                     printf("DPDK RX: Routed seq=%u to ESTABLISHED connection fd=%d\n",
                            rte_be_to_cpu_32(tcp->sent_seq), conn->fd);
                 }
-                if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
-                    if (g_dpdk_state->debug) {
-                        printf("DPDK RX: rx_ring full for connection %d\n", conn->fd);
-                    }
+                /* Try to copy payload directly into the connection buffer to free mbufs quickly */
+                size_t total_hdr_len = 0;
+                size_t payload_len = 0;
+                char *payload = NULL;
+
+                if (protocol == DPDK_PROTO_TCP) {
+                    uint8_t tcp_hdr_len = (tcp_hdr->data_off >> 4) * 4;
+                    total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + tcp_hdr_len;
+                    payload = (char *)tcp_hdr + tcp_hdr_len;
+                } else {
+                    total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*udp_hdr);
+                    payload = (char *)(udp_hdr + 1);
+                }
+
+                if (rte_pktmbuf_pkt_len(bufs[i]) >= total_hdr_len) {
+                    payload_len = rte_pktmbuf_pkt_len(bufs[i]) - total_hdr_len;
+                }
+
+                if (payload_len > 0 &&
+                    conn->rx_buffer_offset + payload_len <= conn->rx_buffer_size) {
+                    rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
+                    conn->rx_buffer_offset += payload_len;
                     rte_pktmbuf_free(bufs[i]);
+                } else if (payload_len == 0) {
+                    rte_pktmbuf_free(bufs[i]);
+                } else {
+                    if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
+                        if (g_dpdk_state->debug) {
+                            printf("DPDK RX: rx_ring full for connection %d\n", conn->fd);
+                        }
+                        rte_pktmbuf_free(bufs[i]);
+                    }
                 }
                 matched = 1;
                 break;
