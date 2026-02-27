@@ -76,6 +76,83 @@ static void dpdk_propagate_remote_mac(uint32_t remote_ip, const struct rte_ether
     }
 }
 
+static int dpdk_should_log_now(uint64_t *last_tsc, uint64_t interval_tsc)
+{
+    uint64_t now;
+
+    if (!last_tsc || interval_tsc == 0) {
+        return 1;
+    }
+
+    now = rte_get_tsc_cycles();
+    if (*last_tsc == 0 || now - *last_tsc >= interval_tsc) {
+        *last_tsc = now;
+        return 1;
+    }
+
+    return 0;
+}
+
+static void dpdk_log_queue_snapshot(const char *tag)
+{
+    static uint64_t last_log_tsc = 0;
+    static uint64_t interval_tsc = 0;
+    unsigned int active = 0;
+    unsigned int rx_nonzero = 0;
+    unsigned int tx_nonzero = 0;
+    unsigned int max_rx = 0;
+    unsigned int max_tx = 0;
+    unsigned long long sum_rx = 0;
+    unsigned long long sum_tx = 0;
+    int idx;
+
+    if (!g_dpdk_state || !g_dpdk_state->debug) {
+        return;
+    }
+
+    if (interval_tsc == 0) {
+        interval_tsc = rte_get_tsc_hz();
+        if (interval_tsc == 0) {
+            interval_tsc = 1000000000ULL;
+        }
+    }
+
+    if (!dpdk_should_log_now(&last_log_tsc, interval_tsc)) {
+        return;
+    }
+
+    for (idx = 0; idx < DPDK_MAX_CONNECTIONS; idx++) {
+        struct dpdk_connection *conn = g_dpdk_state->connections[idx];
+        unsigned int rx_count;
+        unsigned int tx_count;
+
+        if (!conn) {
+            continue;
+        }
+
+        active++;
+        rx_count = conn->rx_ring ? rte_ring_count(conn->rx_ring) : 0;
+        tx_count = conn->tx_ring ? rte_ring_count(conn->tx_ring) : 0;
+
+        sum_rx += rx_count;
+        sum_tx += tx_count;
+        if (rx_count > 0) rx_nonzero++;
+        if (tx_count > 0) tx_nonzero++;
+        if (rx_count > max_rx) max_rx = rx_count;
+        if (tx_count > max_tx) max_tx = tx_count;
+    }
+
+    printf("DPDK QUEUES [%s]: active=%u rx_nonzero=%u tx_nonzero=%u sum_rx=%llu sum_tx=%llu max_rx=%u max_tx=%u\n",
+           tag ? tag : "snapshot",
+           active,
+           rx_nonzero,
+           tx_nonzero,
+           sum_rx,
+           sum_tx,
+           max_rx,
+           max_tx);
+}
+
 /* Static helper functions */
 static struct dpdk_connection *dpdk_alloc_connection(int fd);
 static void dpdk_handle_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf);
@@ -758,6 +835,8 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
     size_t total_sent = 0;
     size_t chunk_size;
     const char *data_ptr = (const char *)buf;
+    static uint64_t tx_full_log_tsc = 0;
+    static uint64_t tx_full_log_interval_tsc = 0;
     /* Maximum segment size - MTU (1500) - IP header (20) - TCP header (20) = 1460 */
     const size_t MAX_SEGMENT_SIZE = 1460;
 
@@ -818,6 +897,21 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
 
         /* Queue packet for transmission */
         if (rte_ring_enqueue(conn->tx_ring, mbuf) < 0) {
+            if (g_dpdk_state && g_dpdk_state->debug) {
+                if (tx_full_log_interval_tsc == 0) {
+                    tx_full_log_interval_tsc = rte_get_tsc_hz() / 5;
+                    if (tx_full_log_interval_tsc == 0) {
+                        tx_full_log_interval_tsc = 200000000ULL;
+                    }
+                }
+                if (dpdk_should_log_now(&tx_full_log_tsc, tx_full_log_interval_tsc)) {
+                    unsigned int tx_count = conn->tx_ring ? rte_ring_count(conn->tx_ring) : 0;
+                    unsigned int tx_free = conn->tx_ring ? rte_ring_free_count(conn->tx_ring) : 0;
+                    printf("DPDK TX FULL: fd=%d tx_ring_count=%u tx_ring_free=%u len=%zu total_sent=%zu\n",
+                           sockfd, tx_count, tx_free, len, total_sent);
+                    dpdk_log_queue_snapshot("tx_full");
+                }
+            }
             rte_pktmbuf_free(mbuf);
             /* TX ring full, trigger burst and break */
             dpdk_tx_burst(conn->port_id);
@@ -1181,6 +1275,8 @@ int dpdk_rx_burst(uint16_t port_id)
     struct rte_mbuf *bufs[DPDK_MAX_RX_BURST];
     uint16_t nb_rx;
     int i, idx;
+    static uint64_t rx_full_log_tsc = 0;
+    static uint64_t rx_full_log_interval_tsc = 0;
 
     nb_rx = rte_eth_rx_burst(port_id, 0, bufs, DPDK_MAX_RX_BURST);
 
@@ -1312,7 +1408,19 @@ int dpdk_rx_burst(uint16_t port_id)
                 } else {
                     if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
                         if (g_dpdk_state->debug) {
-                            printf("DPDK RX: rx_ring full for connection %d\n", conn->fd);
+                            if (rx_full_log_interval_tsc == 0) {
+                                rx_full_log_interval_tsc = rte_get_tsc_hz() / 5;
+                                if (rx_full_log_interval_tsc == 0) {
+                                    rx_full_log_interval_tsc = 200000000ULL;
+                                }
+                            }
+                            if (dpdk_should_log_now(&rx_full_log_tsc, rx_full_log_interval_tsc)) {
+                                unsigned int rx_count = conn->rx_ring ? rte_ring_count(conn->rx_ring) : 0;
+                                unsigned int rx_free = conn->rx_ring ? rte_ring_free_count(conn->rx_ring) : 0;
+                                printf("DPDK RX FULL: fd=%d rx_ring_count=%u rx_ring_free=%u payload_len=%zu\n",
+                                       conn->fd, rx_count, rx_free, payload_len);
+                                dpdk_log_queue_snapshot("rx_full");
+                            }
                         }
                         rte_pktmbuf_free(bufs[i]);
                     }
@@ -1340,7 +1448,19 @@ int dpdk_rx_burst(uint16_t port_id)
                     }
                     if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
                         if (g_dpdk_state->debug) {
-                            printf("DPDK RX: rx_ring full for listening socket %d\n", conn->fd);
+                            if (rx_full_log_interval_tsc == 0) {
+                                rx_full_log_interval_tsc = rte_get_tsc_hz() / 5;
+                                if (rx_full_log_interval_tsc == 0) {
+                                    rx_full_log_interval_tsc = 200000000ULL;
+                                }
+                            }
+                            if (dpdk_should_log_now(&rx_full_log_tsc, rx_full_log_interval_tsc)) {
+                                unsigned int rx_count = conn->rx_ring ? rte_ring_count(conn->rx_ring) : 0;
+                                unsigned int rx_free = conn->rx_ring ? rte_ring_free_count(conn->rx_ring) : 0;
+                                printf("DPDK RX FULL: listening_fd=%d rx_ring_count=%u rx_ring_free=%u\n",
+                                       conn->fd, rx_count, rx_free);
+                                dpdk_log_queue_snapshot("listen_rx_full");
+                            }
                         }
                         rte_pktmbuf_free(bufs[i]);
                     }
@@ -1372,6 +1492,8 @@ int dpdk_tx_burst(uint16_t port_id)
     struct rte_mbuf *bufs[DPDK_MAX_TX_BURST];
     uint16_t nb_tx = 0;
     int i, idx;
+    static uint64_t tx_burst_log_tsc = 0;
+    static uint64_t tx_burst_log_interval_tsc = 0;
 
     /* Collect packets from all connections */
     for (idx = 0; idx < DPDK_MAX_CONNECTIONS && nb_tx < DPDK_MAX_TX_BURST; idx++) {
@@ -1385,6 +1507,19 @@ int dpdk_tx_burst(uint16_t port_id)
     }
 
     if (nb_tx > 0) {
+        if (g_dpdk_state->debug) {
+            if (tx_burst_log_interval_tsc == 0) {
+                tx_burst_log_interval_tsc = rte_get_tsc_hz();
+                if (tx_burst_log_interval_tsc == 0) {
+                    tx_burst_log_interval_tsc = 1000000000ULL;
+                }
+            }
+            if (dpdk_should_log_now(&tx_burst_log_tsc, tx_burst_log_interval_tsc)) {
+                printf("DPDK TX BURST: about_to_send=%u\n", nb_tx);
+                dpdk_log_queue_snapshot("tx_burst");
+            }
+        }
+
         /* Dump packets if debug enabled (only control packets, not bulk data) */
         if (g_dpdk_state->packet_dump) {
             for (i = 0; i < nb_tx; i++) {
