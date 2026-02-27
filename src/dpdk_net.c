@@ -724,8 +724,8 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
     /* Trigger TX burst */
     dpdk_tx_burst(conn->port_id);
 
-    /* Small delay to allow packet transmission */
-    usleep(500); /* 500μs delay */
+    /* Delay to allow packet transmission and RX processing */
+    usleep(2000); /* 2ms delay */
 
     return len;
 }
@@ -832,11 +832,11 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     }
 
     /* Blocking mode: wait for data to arrive */
-    /* Wait up to 10 seconds for data (100000 * 100us = 10s) */
+    /* Wait up to 5 seconds for data (100000 * 50us = 5s) */
     int attempts = 0;
     while (attempts < 100000 && conn->rx_buffer_offset == 0) {
-        /* Poll multiple times per iteration for better responsiveness */
-        for (int i = 0; i < 5; i++) {
+        /* Poll more aggressively for better responsiveness */
+        for (int i = 0; i < 10; i++) {
             dpdk_process_packets();
         }
 
@@ -890,8 +890,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         }
 
         attempts++;
-        /* Small sleep to avoid busy-waiting */
-        usleep(100);
+        /* Very short sleep to poll frequently */
+        usleep(50);
     }
 
     /* Check if we got data after waiting */
