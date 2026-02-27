@@ -774,10 +774,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         return -1;
     }
 
-    /* Process incoming packets aggressively */
-    for (int i = 0; i < 5; i++) {
-        dpdk_process_packets();
-    }
+    /* Process incoming packets once */
+    dpdk_process_packets();
 
     /* Try to get packets from rx_ring and extract payload */
     while (conn->rx_buffer_offset < DPDK_RX_BUFFER_SIZE &&
@@ -840,14 +838,12 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     }
 
     /* Blocking mode: wait for data to arrive */
-    /* Wait up to 5 seconds for data */
+    /* Wait up to 10 seconds for data (10000 * 1ms = 10s) */
     int attempts = 0;
-    int max_attempts = 5000000; /* 5 seconds at ~1us per iteration */
+    int max_attempts = 10000;
     while (attempts < max_attempts && conn->rx_buffer_offset == 0) {
-        /* Poll moderately to avoid mbuf exhaustion */
-        for (int i = 0; i < 5; i++) {
-            dpdk_process_packets();
-        }
+        /* Process packets once per iteration to avoid mbuf exhaustion */
+        dpdk_process_packets();
 
         /* Try to dequeue and process packets */
         while (conn->rx_buffer_offset < DPDK_RX_BUFFER_SIZE &&
@@ -889,10 +885,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         }
 
         attempts++;
-        /* Only sleep every 1000 attempts to avoid excessive context switching */
-        if (attempts % 1000 == 0) {
-            usleep(1);
-        }
+        /* Sleep 1ms to allow mbuf recycling and avoid busy-wait */
+        usleep(1000);
     }
 
     /* Check if we got data after waiting */
@@ -1703,10 +1697,8 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
         /* Process DPDK packets if we have DPDK sockets */
         if (has_dpdk_sockets) {
-            /* Process packets moderately to avoid mbuf exhaustion */
-            for (int i = 0; i < 5; i++) {
-                dpdk_process_packets();
-            }
+            /* Single process call to avoid mbuf exhaustion */
+            dpdk_process_packets();
 
             /* Check DPDK sockets for readiness */
             for (fd = 100; fd < nfds; fd++) {
@@ -1758,8 +1750,8 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
         poll_iterations++;
 
-        /* Ultra-short sleep for low-latency polling */
-        usleep(1);
+        /* Sleep 1ms between polls to allow processing */
+        usleep(1000);
     }
 
     /* Handle regular sockets with select() if any */
