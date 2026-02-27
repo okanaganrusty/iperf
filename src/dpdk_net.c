@@ -1326,7 +1326,7 @@ int dpdk_rx_burst(uint16_t port_id)
 
         /* Route packet to appropriate connection */
         /* Debug: Show all connections when routing TCP packets */
-        if (g_dpdk_state->debug && protocol == DPDK_PROTO_TCP) {
+        if (g_dpdk_state->debug > 1 && protocol == DPDK_PROTO_TCP) {
             struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)(ip_hdr + 1);
             printf("DPDK RX: Routing seq=%u from %u.%u.%u.%u:%u to %u.%u.%u.%u:%u\n",
                    rte_be_to_cpu_32(tcp->sent_seq),
@@ -1368,7 +1368,7 @@ int dpdk_rx_burst(uint16_t port_id)
                 src_port == ntohs(remote_sin->sin_port) &&
                 dst_port == ntohs(local_sin->sin_port)) {
                 /* This packet is for this connection */
-                if (g_dpdk_state->debug && protocol == DPDK_PROTO_TCP) {
+                if (g_dpdk_state->debug > 1 && protocol == DPDK_PROTO_TCP) {
                     struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)(ip_hdr + 1);
                     printf("DPDK RX: Routed seq=%u to ESTABLISHED connection fd=%d\n",
                            rte_be_to_cpu_32(tcp->sent_seq), conn->fd);
@@ -1377,9 +1377,10 @@ int dpdk_rx_burst(uint16_t port_id)
                 size_t total_hdr_len = 0;
                 size_t payload_len = 0;
                 char *payload = NULL;
+                struct rte_tcp_hdr *payload_tcp_hdr = NULL;
 
                 if (protocol == DPDK_PROTO_TCP) {
-                    struct rte_tcp_hdr *payload_tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                    payload_tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
                     uint8_t tcp_hdr_len = (payload_tcp_hdr->data_off >> 4) * 4;
                     total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + tcp_hdr_len;
                     payload = (char *)payload_tcp_hdr + tcp_hdr_len;
@@ -1396,6 +1397,27 @@ int dpdk_rx_burst(uint16_t port_id)
                 if (!conn->remote_mac_valid) {
                     conn->remote_mac = eth_hdr->src_addr;
                     conn->remote_mac_valid = 1;
+                }
+
+                if (protocol == DPDK_PROTO_TCP && payload_tcp_hdr) {
+                    uint32_t pkt_seq = rte_be_to_cpu_32(payload_tcp_hdr->sent_seq);
+                    uint32_t ack_advance = (uint32_t)payload_len;
+                    uint32_t candidate_ack;
+
+                    if (payload_tcp_hdr->tcp_flags & DPDK_TCP_FLAG_SYN) {
+                        ack_advance += 1;
+                    }
+                    if (payload_tcp_hdr->tcp_flags & DPDK_TCP_FLAG_FIN) {
+                        ack_advance += 1;
+                    }
+
+                    if (ack_advance > 0) {
+                        candidate_ack = pkt_seq + ack_advance;
+                        if ((int32_t)(candidate_ack - conn->ack_num) > 0) {
+                            conn->ack_num = candidate_ack;
+                        }
+                        dpdk_send_tcp_ack(conn);
+                    }
                 }
 
                 if (payload_len > 0 &&
@@ -1441,7 +1463,7 @@ int dpdk_rx_burst(uint16_t port_id)
                 struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
                 if (dst_port == ntohs(local_sin->sin_port)) {
                     /* This is for our listening socket */
-                    if (g_dpdk_state->debug) {
+                    if (g_dpdk_state->debug > 1) {
                         struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)(ip_hdr + 1);
                         printf("DPDK RX: Routed seq=%u to LISTENING socket fd=%d\n",
                                rte_be_to_cpu_32(tcp->sent_seq), conn->fd);
@@ -1472,7 +1494,7 @@ int dpdk_rx_burst(uint16_t port_id)
 
         if (!matched) {
             /* No matching connection found */
-            if (g_dpdk_state->debug) {
+            if (g_dpdk_state->debug > 1) {
                 char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &ip_hdr->src_addr, src_ip, INET_ADDRSTRLEN);
                 inet_ntop(AF_INET, &ip_hdr->dst_addr, dst_ip, INET_ADDRSTRLEN);
