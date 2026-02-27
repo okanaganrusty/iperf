@@ -116,7 +116,7 @@ struct dpdk_state {
 };
 
 /* DPDK initialization and cleanup */
-int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr);
+int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, const char *netmask);
 int dpdk_net_cleanup(void);
 int dpdk_net_configure_port(uint16_t port_id);
 

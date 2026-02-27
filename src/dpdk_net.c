@@ -32,7 +32,7 @@ static int dpdk_send_tcp_syn(struct dpdk_connection *conn);
 static int dpdk_send_tcp_ack(struct dpdk_connection *conn);
 
 /* Initialize DPDK */
-int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr)
+int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, const char *netmask)
 {
     int ret;
     char pool_name[32];
@@ -102,6 +102,17 @@ int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr)
             fprintf(stderr, "Invalid IP address: %s\n", ip_addr);
             return -1;
         }
+    }
+
+    /* Parse and set netmask (default to /24 if not specified) */
+    if (netmask) {
+        if (inet_pton(AF_INET, netmask, &g_dpdk_state->ipv4_netmask) != 1) {
+            fprintf(stderr, "Invalid netmask: %s\n", netmask);
+            return -1;
+        }
+    } else {
+        /* Default to 255.255.255.0 (/24) */
+        inet_pton(AF_INET, "255.255.255.0", &g_dpdk_state->ipv4_netmask);
     }
 
     /* Get MAC address */

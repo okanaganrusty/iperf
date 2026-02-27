@@ -110,6 +110,7 @@ typedef atomic_uint_fast64_t atomic_iperf_size_t;
 #define OPT_DPDK_ENABLE 36
 #define OPT_DPDK_PORT 37
 #define OPT_DPDK_IP 38
+#define OPT_DPDK_NETMASK 39
 
 /* states */
 #define TEST_START 1

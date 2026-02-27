@@ -1194,6 +1194,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
         {"dpdk", no_argument, NULL, OPT_DPDK_ENABLE},
         {"dpdk-port", required_argument, NULL, OPT_DPDK_PORT},
         {"dpdk-ip", required_argument, NULL, OPT_DPDK_IP},
+        {"dpdk-netmask", required_argument, NULL, OPT_DPDK_NETMASK},
 #endif
         {"debug", optional_argument, NULL, 'd'},
         {"help", no_argument, NULL, 'h'},
@@ -1814,6 +1815,13 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
             case OPT_DPDK_IP:
                 test->dpdk_ip_addr = strdup(optarg);
                 if (!test->dpdk_ip_addr) {
+                    i_errno = IENEWTEST;
+                    return -1;
+                }
+                break;
+            case OPT_DPDK_NETMASK:
+                test->dpdk_netmask = strdup(optarg);
+                if (!test->dpdk_netmask) {
                     i_errno = IENEWTEST;
                     return -1;
                 }

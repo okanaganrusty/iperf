@@ -353,6 +353,7 @@ struct iperf_test
     int       dpdk_enabled;                      /* Whether DPDK is enabled */
     uint16_t  dpdk_port_id;                      /* DPDK port ID */
     char     *dpdk_ip_addr;                      /* DPDK IP address */
+    char     *dpdk_netmask;                      /* DPDK netmask */
     int       dpdk_argc;                         /* DPDK EAL arguments */
     char    **dpdk_argv;
 #endif

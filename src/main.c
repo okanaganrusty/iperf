@@ -166,7 +166,8 @@ main(int argc, char **argv)
         }
 
         if (dpdk_net_init(test->dpdk_argc, test->dpdk_argv,
-                          test->dpdk_port_id, test->dpdk_ip_addr) < 0) {
+                          test->dpdk_port_id, test->dpdk_ip_addr,
+                          test->dpdk_netmask) < 0) {
             iperf_errexit(test, "DPDK initialization failed");
         }
         fprintf(stderr, "DPDK initialized successfully on port %u\n", test->dpdk_port_id);
