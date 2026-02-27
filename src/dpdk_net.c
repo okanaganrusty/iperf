@@ -1593,6 +1593,8 @@ int dpdk_rx_burst(uint16_t port_id)
                             dpdk_send_tcp_ack(conn);
                             conn->last_ack_sent = conn->ack_num;
                             conn->last_ack_tsc = now_tsc;
+                            /* Track actual advertised window in delayed ACKs (for delta-based updates) */
+                            conn->last_advertised_rwnd = conn->rwnd_available;
                         }
                     }
 
