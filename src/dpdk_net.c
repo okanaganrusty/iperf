@@ -942,9 +942,9 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
             break;
         }
 
-        /* Queue packet for transmission, retry if full (blocking mode) */
+        /* Queue packet for transmission, retry briefly if full (background TX thread will drain) */
         int enqueue_attempts = 0;
-        const int max_enqueue_attempts = conn->nonblocking ? 1 : 1000;
+        const int max_enqueue_attempts = conn->nonblocking ? 1 : 10;  /* Reduced from 1000 */
         while (rte_ring_enqueue(conn->tx_ring, mbuf) < 0) {
             if (enqueue_attempts == 0 && g_dpdk_state && g_dpdk_state->debug) {
                 if (tx_full_log_interval_tsc == 0) {
@@ -962,27 +962,27 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
                 }
             }
 
-            /* Trigger TX burst to drain the ring */
+            /* Trigger TX burst briefly to drain */
             dpdk_tx_burst(conn->port_id);
 
             enqueue_attempts++;
             if (enqueue_attempts >= max_enqueue_attempts) {
-                /* Give up - non-blocking or timeout */
+                /* Give up - rely on background TX thread to drain */
                 rte_pktmbuf_free(mbuf);
                 if (total_sent == 0) {
                     errno = EAGAIN;
                     return -1;
                 }
-                /* Partial send */
+                /* Partial send - caller will retry when TX ring has space */
                 if (g_dpdk_state && g_dpdk_state->debug && len > MAX_SEGMENT_SIZE) {
-                    printf("DPDK send: sockfd=%d sent %zu/%zu bytes (TX ring timeout)\n",
+                    printf("DPDK send: sockfd=%d sent %zu/%zu bytes (TX ring full, partial)\n",
                            sockfd, total_sent, len);
                 }
                 return total_sent;
             }
 
-            /* Brief delay to let TX thread drain */
-            rte_delay_us_block(100);
+            /* Very brief delay to let TX thread make progress */
+            rte_delay_us_block(10);
         }
 
         total_sent += chunk_size;
