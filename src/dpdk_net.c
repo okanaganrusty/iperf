@@ -840,7 +840,7 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     /* Blocking mode: wait for data to arrive */
     /* Wait up to 10 seconds for data (10000 * 1ms = 10s) */
     int attempts = 0;
-    int max_attempts = 10000;
+    int max_attempts = 200000;
     while (attempts < max_attempts && conn->rx_buffer_offset == 0) {
         /* Process packets once per iteration to avoid mbuf exhaustion */
         dpdk_process_packets();
@@ -885,8 +885,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         }
 
         attempts++;
-        /* Sleep 1ms to allow mbuf recycling and avoid busy-wait */
-        usleep(1000);
+        /* Short busy-wait to improve throughput while still yielding */
+        rte_delay_us_block(50);
     }
 
     /* Check if we got data after waiting */
@@ -1668,6 +1668,8 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
     uint64_t timeout_us = 0;
     uint64_t elapsed_us = 0;
     int poll_iterations = 0;
+    int spin_iterations = 0;
+    const int spin_limit = 64;
 
     if (!g_dpdk_state) {
         /* No DPDK initialized, use regular select */
@@ -1777,8 +1779,14 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
         poll_iterations++;
 
-        /* Sleep 1ms between polls to allow processing */
-        usleep(1000);
+        /* Busy-poll briefly to reduce latency, then yield if still idle */
+        if (spin_iterations < spin_limit) {
+            rte_delay_us_block(1);
+            spin_iterations++;
+        } else {
+            usleep(1000);
+            spin_iterations = 0;
+        }
     }
 
     /* Handle regular sockets with select() if any */
