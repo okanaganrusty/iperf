@@ -1446,78 +1446,114 @@ int dpdk_rx_burst(uint16_t port_id)
                     conn->remote_mac_valid = 1;
                 }
 
+                /* Process TCP protocol state and ACK logic */
                 if (protocol == DPDK_PROTO_TCP && payload_tcp_hdr) {
                     uint32_t pkt_seq = rte_be_to_cpu_32(payload_tcp_hdr->sent_seq);
-                    uint32_t ack_advance = (uint32_t)payload_len;
-                    uint32_t candidate_ack;
                     uint8_t tcp_flags = payload_tcp_hdr->tcp_flags;
                     int force_ack = 0;
-                    uint64_t now_tsc;
-                    uint64_t ack_interval_tsc;
-                    uint32_t ack_delta;
+                    int payload_buffered = 0;
 
+                    /* Check control flags */
                     if (tcp_flags & DPDK_TCP_FLAG_SYN) {
-                        ack_advance += 1;
                         force_ack = 1;
                     }
                     if (tcp_flags & DPDK_TCP_FLAG_FIN) {
-                        ack_advance += 1;
                         force_ack = 1;
                     }
                     if (tcp_flags & DPDK_TCP_FLAG_RST) {
                         force_ack = 1;
                     }
 
-                    if (ack_advance > 0) {
-                        candidate_ack = pkt_seq + ack_advance;
-                        if ((int32_t)(candidate_ack - conn->ack_num) > 0) {
-                            conn->ack_num = candidate_ack;
+                    /* Try to buffer payload FIRST before updating ACK number */
+                    if (payload_len > 0 &&
+                        conn->rx_buffer_offset + payload_len <= conn->rx_buffer_size) {
+                        rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
+                        conn->rx_buffer_offset += payload_len;
+                        payload_buffered = 1;
+                        rte_pktmbuf_free(bufs[i]);
+                    } else if (payload_len == 0) {
+                        payload_buffered = 1;  /* No payload is trivially buffered */
+                        rte_pktmbuf_free(bufs[i]);
+                    } else {
+                        /* RX buffer full, try rx_ring as fallback */
+                        if (rte_ring_enqueue(conn->rx_ring, bufs[i]) == 0) {
+                            payload_buffered = 1;
+                        } else {
+                            /* Both buffer and ring full - drop packet and don't ACK */
+                            if (g_dpdk_state->debug) {
+                                if (rx_full_log_interval_tsc == 0) {
+                                    rx_full_log_interval_tsc = rte_get_tsc_hz() / 5;
+                                    if (rx_full_log_interval_tsc == 0) {
+                                        rx_full_log_interval_tsc = 200000000ULL;
+                                    }
+                                }
+                                if (dpdk_should_log_now(&rx_full_log_tsc, rx_full_log_interval_tsc)) {
+                                    unsigned int rx_count = conn->rx_ring ? rte_ring_count(conn->rx_ring) : 0;
+                                    unsigned int rx_free = conn->rx_ring ? rte_ring_free_count(conn->rx_ring) : 0;
+                                    printf("DPDK RX FULL: fd=%d rx_ring_count=%u rx_ring_free=%u payload_len=%zu - DROPPING\n",
+                                           conn->fd, rx_count, rx_free, payload_len);
+                                    dpdk_log_queue_snapshot("rx_full");
+                                }
+                            }
+                            rte_pktmbuf_free(bufs[i]);
+                            payload_buffered = 0;
                         }
                     }
 
-                    if ((int32_t)(conn->ack_num - conn->last_ack_sent) > 0) {
-                        now_tsc = rte_get_tsc_cycles();
-                        ack_interval_tsc = rte_get_tsc_hz() / 5000; /* ~200us */
-                        if (ack_interval_tsc == 0) {
-                            ack_interval_tsc = 1;
+                    /* Only update ACK if we successfully buffered the data (or it's a control packet) */
+                    if (payload_buffered || force_ack) {
+                        uint32_t ack_advance = 0;
+                        uint32_t candidate_ack;
+                        uint64_t now_tsc;
+                        uint64_t ack_interval_tsc;
+                        uint32_t ack_delta;
+
+                        if (payload_buffered) {
+                            ack_advance = (uint32_t)payload_len;
+                        }
+                        if (tcp_flags & DPDK_TCP_FLAG_SYN) {
+                            ack_advance += 1;
+                        }
+                        if (tcp_flags & DPDK_TCP_FLAG_FIN) {
+                            ack_advance += 1;
                         }
 
-                        ack_delta = conn->ack_num - conn->last_ack_sent;
-                        if (force_ack ||
-                            ack_delta >= (16U * 1460U) ||
-                            conn->last_ack_tsc == 0 ||
-                            (now_tsc - conn->last_ack_tsc) >= ack_interval_tsc) {
-                            dpdk_send_tcp_ack(conn);
-                            conn->last_ack_sent = conn->ack_num;
-                            conn->last_ack_tsc = now_tsc;
+                        if (ack_advance > 0) {
+                            candidate_ack = pkt_seq + ack_advance;
+                            if ((int32_t)(candidate_ack - conn->ack_num) > 0) {
+                                conn->ack_num = candidate_ack;
+                            }
+                        }
+
+                        if ((int32_t)(conn->ack_num - conn->last_ack_sent) > 0) {
+                            now_tsc = rte_get_tsc_cycles();
+                            ack_interval_tsc = rte_get_tsc_hz() / 5000; /* ~200us */
+                            if (ack_interval_tsc == 0) {
+                                ack_interval_tsc = 1;
+                            }
+
+                            ack_delta = conn->ack_num - conn->last_ack_sent;
+                            if (force_ack ||
+                                ack_delta >= (16U * 1460U) ||
+                                conn->last_ack_tsc == 0 ||
+                                (now_tsc - conn->last_ack_tsc) >= ack_interval_tsc) {
+                                dpdk_send_tcp_ack(conn);
+                                conn->last_ack_sent = conn->ack_num;
+                                conn->last_ack_tsc = now_tsc;
+                            }
                         }
                     }
-                }
-
-                if (payload_len > 0 &&
-                    conn->rx_buffer_offset + payload_len <= conn->rx_buffer_size) {
+                } else if (payload_len > 0 &&
+                           conn->rx_buffer_offset + payload_len <= conn->rx_buffer_size) {
+                    /* Non-TCP or no TCP header - simple buffering */
                     rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
                     conn->rx_buffer_offset += payload_len;
                     rte_pktmbuf_free(bufs[i]);
                 } else if (payload_len == 0) {
                     rte_pktmbuf_free(bufs[i]);
                 } else {
+                    /* Non-TCP fallback: enqueue to rx_ring */
                     if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
-                        if (g_dpdk_state->debug) {
-                            if (rx_full_log_interval_tsc == 0) {
-                                rx_full_log_interval_tsc = rte_get_tsc_hz() / 5;
-                                if (rx_full_log_interval_tsc == 0) {
-                                    rx_full_log_interval_tsc = 200000000ULL;
-                                }
-                            }
-                            if (dpdk_should_log_now(&rx_full_log_tsc, rx_full_log_interval_tsc)) {
-                                unsigned int rx_count = conn->rx_ring ? rte_ring_count(conn->rx_ring) : 0;
-                                unsigned int rx_free = conn->rx_ring ? rte_ring_free_count(conn->rx_ring) : 0;
-                                printf("DPDK RX FULL: fd=%d rx_ring_count=%u rx_ring_free=%u payload_len=%zu\n",
-                                       conn->fd, rx_count, rx_free, payload_len);
-                                dpdk_log_queue_snapshot("rx_full");
-                            }
-                        }
                         rte_pktmbuf_free(bufs[i]);
                     }
                 }
@@ -1590,17 +1626,27 @@ int dpdk_tx_burst(uint16_t port_id)
     int i, idx;
     static uint64_t tx_burst_log_tsc = 0;
     static uint64_t tx_burst_log_interval_tsc = 0;
+    static int last_conn_idx = 0;  /* Round-robin starting point */
+    int conn_checked = 0;
 
-    /* Collect packets from all connections */
-    for (idx = 0; idx < DPDK_MAX_CONNECTIONS && nb_tx < DPDK_MAX_TX_BURST; idx++) {
+    /* Collect packets from all connections in round-robin fashion with fair limit per connection */
+    idx = last_conn_idx;
+    while (conn_checked < DPDK_MAX_CONNECTIONS && nb_tx < DPDK_MAX_TX_BURST) {
         struct dpdk_connection *conn = g_dpdk_state->connections[idx];
         if (conn && conn->tx_ring) {
-            while (nb_tx < DPDK_MAX_TX_BURST &&
+            /* Limit packets from this connection to ensure fairness */
+            uint16_t conn_pkts = 0;
+            while (conn_pkts < DPDK_MAX_PKT_PER_CONN_PER_BURST &&
+                   nb_tx < DPDK_MAX_TX_BURST &&
                    rte_ring_dequeue(conn->tx_ring, (void **)&bufs[nb_tx]) == 0) {
                 nb_tx++;
+                conn_pkts++;
             }
         }
+        conn_checked++;
+        idx = (idx + 1) % DPDK_MAX_CONNECTIONS;
     }
+    last_conn_idx = idx;  /* Remember where we left off for next burst */
 
     if (nb_tx > 0) {
         if (g_dpdk_state->debug) {
