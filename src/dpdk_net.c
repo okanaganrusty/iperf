@@ -761,6 +761,16 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
 
         /* Copy payload to rx_buffer if there's space */
         if (payload_len > 0 && conn->rx_buffer_offset + payload_len <= DPDK_RX_BUFFER_SIZE) {
+            if (g_dpdk_state->debug) {
+                printf("DPDK recv: extracting %zu bytes, will copy to buffer offset %u\n",
+                       payload_len, conn->rx_buffer_offset);
+                printf("DPDK recv: first 16 bytes of payload: ");
+                for (size_t i = 0; i < (payload_len < 16 ? payload_len : 16); i++) {
+                    printf("%02x ", (unsigned char)payload[i]);
+                }
+                printf("\n");
+            }
+
             rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
             conn->rx_buffer_offset += payload_len;
 
@@ -776,6 +786,17 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     /* Copy data from RX buffer */
     if (conn->rx_buffer_offset > 0) {
         copied = (conn->rx_buffer_offset < len) ? conn->rx_buffer_offset : len;
+
+        if (g_dpdk_state->debug) {
+            printf("DPDK recv: copying %zd bytes from buffer (buffer has %u bytes, requested %zu)\n",
+                   copied, conn->rx_buffer_offset, len);
+            printf("DPDK recv: first 16 bytes of buffer: ");
+            for (int i = 0; i < (conn->rx_buffer_offset < 16 ? conn->rx_buffer_offset : 16); i++) {
+                printf("%02x ", (unsigned char)conn->rx_buffer[i]);
+            }
+            printf("\n");
+        }
+
         memcpy(buf, conn->rx_buffer, copied);
 
         /* Shift remaining data */
@@ -828,11 +849,16 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
             payload_len = rte_pktmbuf_pkt_len(mbuf) - total_hdr_len;
 
             if (payload_len > 0 && conn->rx_buffer_offset + payload_len <= DPDK_RX_BUFFER_SIZE) {
+                if (g_dpdk_state->debug) {
+                    printf("DPDK recv (blocking): extracting %zu bytes, will copy to buffer offset %u\n",
+                           payload_len, conn->rx_buffer_offset);
+                }
+
                 rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
                 conn->rx_buffer_offset += payload_len;
 
                 if (g_dpdk_state->debug) {
-                    printf("DPDK recv: extracted %zu bytes payload from packet (total in buffer: %u)\n",
+                    printf("DPDK recv (blocking): extracted %zu bytes payload from packet (total in buffer: %u)\n",
                            payload_len, conn->rx_buffer_offset);
                 }
             }
@@ -852,6 +878,12 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     /* Check if we got data after waiting */
     if (conn->rx_buffer_offset > 0) {
         copied = (conn->rx_buffer_offset < len) ? conn->rx_buffer_offset : len;
+
+        if (g_dpdk_state->debug) {
+            printf("DPDK recv (blocking): copying %zd bytes from buffer (buffer has %u bytes, requested %zu)\n",
+                   copied, conn->rx_buffer_offset, len);
+        }
+
         memcpy(buf, conn->rx_buffer, copied);
 
         if (copied < conn->rx_buffer_offset) {
