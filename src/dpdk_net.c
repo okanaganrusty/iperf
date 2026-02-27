@@ -1181,8 +1181,8 @@ int dpdk_rx_burst(uint16_t port_id)
             struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
 
             if (ip_hdr->src_addr == remote_sin->sin_addr.s_addr &&
-                src_port == remote_sin->sin_port &&
-                dst_port == local_sin->sin_port) {
+                src_port == ntohs(remote_sin->sin_port) &&
+                dst_port == ntohs(local_sin->sin_port)) {
                 /* This packet is for this connection */
                 if (g_dpdk_state->debug && protocol == DPDK_PROTO_TCP) {
                     struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)(ip_hdr + 1);
@@ -1209,7 +1209,7 @@ int dpdk_rx_burst(uint16_t port_id)
                 }
 
                 struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
-                if (dst_port == local_sin->sin_port) {
+                if (dst_port == ntohs(local_sin->sin_port)) {
                     /* This is for our listening socket */
                     if (g_dpdk_state->debug) {
                         struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)(ip_hdr + 1);
@@ -1235,7 +1235,7 @@ int dpdk_rx_burst(uint16_t port_id)
                 inet_ntop(AF_INET, &ip_hdr->src_addr, src_ip, INET_ADDRSTRLEN);
                 inet_ntop(AF_INET, &ip_hdr->dst_addr, dst_ip, INET_ADDRSTRLEN);
                 printf("DPDK RX: No matching connection for %s:%u -> %s:%u proto=%u\n",
-                       src_ip, rte_be_to_cpu_16(src_port), dst_ip, rte_be_to_cpu_16(dst_port), protocol);
+                       src_ip, src_port, dst_ip, dst_port, protocol);
             }
             rte_pktmbuf_free(bufs[i]);
         }
