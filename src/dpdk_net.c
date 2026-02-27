@@ -1093,6 +1093,7 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         #define WINDOW_UPDATE_THRESHOLD (DPDK_RX_BUFFER_SIZE / 8)
         if (conn->rwnd_available >= conn->last_advertised_rwnd + WINDOW_UPDATE_THRESHOLD) {
             dpdk_send_tcp_ack(conn);
+            conn->last_advertised_rwnd = conn->rwnd_available;
         }
 
         return copied;
@@ -1178,6 +1179,7 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         /* Send window update ACK if window has grown significantly since last advertisement */
         if (conn->rwnd_available >= conn->last_advertised_rwnd + WINDOW_UPDATE_THRESHOLD) {
             dpdk_send_tcp_ack(conn);
+            conn->last_advertised_rwnd = conn->rwnd_available;
         }
 
         return copied;
@@ -1904,9 +1906,6 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
         scaled_window = 65535;  /* Max for 16-bit field */
     }
     tcp_hdr->rx_win = rte_cpu_to_be_16((uint16_t)scaled_window);
-
-    /* Track what window we advertised for future delta calculations */
-    conn->last_advertised_rwnd = conn->rwnd_available;
 
     tcp_hdr->cksum = 0;
     tcp_hdr->tcp_urp = 0;
