@@ -518,6 +518,44 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 
         g_dpdk_state->connections[idx] = new_conn;
 
+        /* Transfer any remaining packets from listener that match the new connection */
+        struct rte_mbuf *temp_bufs[DPDK_RX_RING_SIZE];
+        unsigned int temp_count = 0;
+        struct rte_mbuf *pkt;
+
+        /* Drain the listener's rx_ring temporarily */
+        while (rte_ring_dequeue(conn->rx_ring, (void **)&pkt) == 0) {
+            struct rte_ether_hdr *pkt_eth = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+            struct rte_ipv4_hdr *pkt_ip = (struct rte_ipv4_hdr *)(pkt_eth + 1);
+            struct rte_tcp_hdr *pkt_tcp = (struct rte_tcp_hdr *)(pkt_ip + 1);
+
+            /* Check if this packet is for the new connection */
+            if (pkt_ip->src_addr == remote_addr.sin_addr.s_addr &&
+                pkt_tcp->src_port == remote_addr.sin_port) {
+                /* This packet belongs to the new connection */
+                if (rte_ring_enqueue(new_conn->rx_ring, pkt) < 0) {
+                    if (g_dpdk_state->debug) {
+                        printf("DPDK accept: failed to transfer packet to new connection\n");
+                    }
+                    rte_pktmbuf_free(pkt);
+                }
+            } else {
+                /* Keep this packet for re-queuing to listener */
+                if (temp_count < DPDK_RX_RING_SIZE) {
+                    temp_bufs[temp_count++] = pkt;
+                } else {
+                    rte_pktmbuf_free(pkt);
+                }
+            }
+        }
+
+        /* Re-queue packets that don't match the new connection back to listener */
+        for (unsigned int i = 0; i < temp_count; i++) {
+            if (rte_ring_enqueue(conn->rx_ring, temp_bufs[i]) < 0) {
+                rte_pktmbuf_free(temp_bufs[i]);
+            }
+        }
+
         if (addr && addrlen) {
             socklen_t copy_len = *addrlen < sizeof(remote_addr) ? *addrlen : sizeof(remote_addr);
             memcpy(addr, &remote_addr, copy_len);
@@ -984,40 +1022,45 @@ int dpdk_rx_burst(uint16_t port_id)
         }
 
         /* Route packet to appropriate connection */
+        /* Check established connections first (more specific match) */
         for (idx = 0; idx < DPDK_MAX_CONNECTIONS; idx++) {
             struct dpdk_connection *conn = g_dpdk_state->connections[idx];
-            if (!conn) {
+            if (!conn || !conn->connected) {
                 continue;
             }
 
-            /* Check if this is for a listening socket (SYN packet) */
-            if (conn->listening && protocol == DPDK_PROTO_TCP) {
+            struct sockaddr_in *remote_sin = (struct sockaddr_in *)&conn->remote_addr;
+            struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
+
+            if (ip_hdr->src_addr == remote_sin->sin_addr.s_addr &&
+                src_port == remote_sin->sin_port &&
+                dst_port == local_sin->sin_port) {
+                /* This packet is for this connection */
+                if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
+                    if (g_dpdk_state->debug) {
+                        printf("DPDK RX: rx_ring full for connection %d\n", conn->fd);
+                    }
+                    rte_pktmbuf_free(bufs[i]);
+                }
+                matched = 1;
+                break;
+            }
+        }
+
+        /* If no established connection matched, check listening sockets */
+        if (!matched) {
+            for (idx = 0; idx < DPDK_MAX_CONNECTIONS; idx++) {
+                struct dpdk_connection *conn = g_dpdk_state->connections[idx];
+                if (!conn || !conn->listening || protocol != DPDK_PROTO_TCP) {
+                    continue;
+                }
+
                 struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
                 if (dst_port == local_sin->sin_port) {
                     /* This is for our listening socket */
                     if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
                         if (g_dpdk_state->debug) {
                             printf("DPDK RX: rx_ring full for listening socket %d\n", conn->fd);
-                        }
-                        rte_pktmbuf_free(bufs[i]);
-                    }
-                    matched = 1;
-                    break;
-                }
-            }
-
-            /* Check if this is for an established connection */
-            if (conn->connected) {
-                struct sockaddr_in *remote_sin = (struct sockaddr_in *)&conn->remote_addr;
-                struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
-
-                if (ip_hdr->src_addr == remote_sin->sin_addr.s_addr &&
-                    src_port == remote_sin->sin_port &&
-                    dst_port == local_sin->sin_port) {
-                    /* This packet is for this connection */
-                    if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
-                        if (g_dpdk_state->debug) {
-                            printf("DPDK RX: rx_ring full for connection %d\n", conn->fd);
                         }
                         rte_pktmbuf_free(bufs[i]);
                     }
