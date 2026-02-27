@@ -465,8 +465,10 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
         return -1;
     }
 
-    /* Poll for packets */
-    dpdk_process_packets();
+    /* Poll for packets multiple times to ensure we catch everything */
+    for (int i = 0; i < 10; i++) {
+        dpdk_process_packets();
+    }
 
     /* Check if there are any pending connections in the RX ring */
     if (rte_ring_dequeue(conn->rx_ring, (void **)&mbuf) == 0) {
@@ -720,6 +722,9 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
 
     /* Trigger TX burst */
     dpdk_tx_burst(conn->port_id);
+
+    /* Process packets to give receiver time to fetch */
+    dpdk_process_packets();
 
     return len;
 }
