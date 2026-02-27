@@ -1800,7 +1800,7 @@ int dpdk_parse_ip_addr(const char *ip_str, uint32_t *ip_addr)
     return inet_pton(AF_INET, ip_str, ip_addr) == 1 ? 0 : -1;
 }
 
-/* Helper: Create TCP packet */
+/* Helper: Create TCP packet with optional window scaling option */
 int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
                            const void *data, size_t len, uint8_t flags)
 {
@@ -1808,12 +1808,22 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     struct rte_ipv4_hdr *ip_hdr;
     struct rte_tcp_hdr *tcp_hdr;
     char *payload;
+    uint8_t *options;
+    int include_wscale = 0;
+    int tcp_hdr_len = 20;  /* Base header length */
+
+    /* Determine if we should include window scale option (for SYN, SYN-ACK responses) */
+    include_wscale = (flags & (DPDK_TCP_FLAG_SYN | DPDK_TCP_FLAG_ACK)) != 0;
+    if (include_wscale) {
+        tcp_hdr_len = 24;  /* 20 + 4 bytes for window scale option */
+    }
 
     /* Reserve space for headers */
     eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr *);
     ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
     tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
-    payload = (char *)(tcp_hdr + 1);
+    options = (uint8_t *)(tcp_hdr + 1);
+    payload = (char *)options + (tcp_hdr_len - 20);
 
     /* Copy payload */
     if (len > 0) {
@@ -1821,7 +1831,7 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     }
 
     /* Set packet length */
-    mbuf->data_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*tcp_hdr) + len;
+    mbuf->data_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + tcp_hdr_len + len;
     mbuf->pkt_len = mbuf->data_len;
 
     /* Fill Ethernet header */
@@ -1844,7 +1854,7 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     /* Fill IP header - simplified */
     ip_hdr->version_ihl = 0x45; /* IPv4, 20 byte header */
     ip_hdr->type_of_service = 0;
-    ip_hdr->total_length = rte_cpu_to_be_16(sizeof(*ip_hdr) + sizeof(*tcp_hdr) + len);
+    ip_hdr->total_length = rte_cpu_to_be_16(sizeof(*ip_hdr) + tcp_hdr_len + len);
     ip_hdr->packet_id = 0;
     ip_hdr->fragment_offset = 0;
     ip_hdr->time_to_live = 64;
@@ -1854,16 +1864,24 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     ip_hdr->dst_addr = dst_ip;
     ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
 
-    /* Fill TCP header - simplified */
+    /* Fill TCP header */
     tcp_hdr->src_port = src_port;
     tcp_hdr->dst_port = dst_port;
     tcp_hdr->sent_seq = rte_cpu_to_be_32(conn->seq_num);
     tcp_hdr->recv_ack = rte_cpu_to_be_32(conn->ack_num);
 
-    /* Set TCP header length - 20 bytes base (0x50 = 5 * 4 bytes) */
-    /* We'll set options later if needed */
-    tcp_hdr->data_off = 0x50;
+    /* Set TCP header length in data_off field */
+    tcp_hdr->data_off = (tcp_hdr_len / 4) << 4;
     tcp_hdr->tcp_flags = flags;
+
+    /* Add window scale option if needed (RFC 1323) */
+    if (include_wscale && tcp_hdr_len == 24) {
+        /* Window Scale option: kind=3, length=3, shift value */
+        options[0] = 3;                    /* Kind (3 = Window Scale) */
+        options[1] = 3;                    /* Length (3 bytes total) */
+        options[2] = conn->wscale_local;   /* Shift value */
+        options[3] = 0;                    /* Padding to 4-byte boundary */
+    }
 
     /* Update and advertise window based on available buffer space */
     /* window_size is advertised window / 2^wscale_remote */
@@ -1873,7 +1891,6 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     }
     tcp_hdr->rx_win = rte_cpu_to_be_16((uint16_t)scaled_window);
 
-    tcp_hdr->cksum = 0;
     tcp_hdr->cksum = 0;
     tcp_hdr->tcp_urp = 0;
 
