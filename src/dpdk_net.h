@@ -26,8 +26,8 @@
 #include <rte_udp.h>
 
 /* DPDK Configuration */
-#define DPDK_MAX_RX_BURST 32
-#define DPDK_MAX_TX_BURST 32
+#define DPDK_MAX_RX_BURST 256
+#define DPDK_MAX_TX_BURST 256
 #define DPDK_RX_RING_SIZE 1024
 #define DPDK_TX_RING_SIZE 1024
 #define DPDK_NUM_MBUFS 8191

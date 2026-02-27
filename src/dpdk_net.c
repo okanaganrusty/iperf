@@ -747,8 +747,8 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
 
         total_sent += chunk_size;
 
-        /* Trigger TX burst every 16 packets or when done */
-        if (rte_ring_count(conn->tx_ring) >= 16 || total_sent >= len) {
+        /* Trigger TX burst when ring is getting full or when done */
+        if (rte_ring_count(conn->tx_ring) >= 128 || total_sent >= len) {
             dpdk_tx_burst(conn->port_id);
         }
     }
@@ -1152,8 +1152,8 @@ int dpdk_rx_burst(uint16_t port_id)
 
         g_dpdk_state->rx_bytes += rte_pktmbuf_pkt_len(bufs[i]);
 
-        /* Dump packet if debug enabled */
-        if (g_dpdk_state->packet_dump) {
+        /* Dump packet if debug enabled (only small control packets < 100 bytes) */
+        if (g_dpdk_state->packet_dump && rte_pktmbuf_pkt_len(bufs[i]) < 100) {
             dpdk_dump_packet("RX", bufs[i]);
         }
 
@@ -1303,10 +1303,13 @@ int dpdk_tx_burst(uint16_t port_id)
     }
 
     if (nb_tx > 0) {
-        /* Dump packets if debug enabled */
+        /* Dump packets if debug enabled (only control packets, not bulk data) */
         if (g_dpdk_state->packet_dump) {
             for (i = 0; i < nb_tx; i++) {
-                dpdk_dump_packet("TX", bufs[i]);
+                /* Only dump small control packets (< 100 bytes) to avoid performance impact */
+                if (rte_pktmbuf_pkt_len(bufs[i]) < 100) {
+                    dpdk_dump_packet("TX", bufs[i]);
+                }
             }
         }
 
@@ -1804,8 +1807,8 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
         poll_iterations++;
 
-        /* Short sleep to avoid busy-waiting */
-        usleep(1000); /* 1ms sleep */
+        /* Very short sleep to avoid busy-waiting while maintaining responsiveness */
+        usleep(100); /* 100us sleep - balance between CPU usage and latency */
     }
 
     /* Handle regular sockets with select() if any */
