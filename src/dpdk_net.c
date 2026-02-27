@@ -808,23 +808,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
 
         /* Copy payload to rx_buffer if there's space */
         if (payload_len > 0 && conn->rx_buffer_offset + payload_len <= DPDK_RX_BUFFER_SIZE) {
-            if (g_dpdk_state->debug) {
-                printf("DPDK recv: extracting %zu bytes, will copy to buffer offset %u\n",
-                       payload_len, conn->rx_buffer_offset);
-                printf("DPDK recv: first 16 bytes of payload: ");
-                for (size_t i = 0; i < (payload_len < 16 ? payload_len : 16); i++) {
-                    printf("%02x ", (unsigned char)payload[i]);
-                }
-                printf("\n");
-            }
-
             rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
             conn->rx_buffer_offset += payload_len;
-
-            if (g_dpdk_state->debug) {
-                printf("DPDK recv: extracted %zu bytes payload from packet (total in buffer: %u)\n",
-                       payload_len, conn->rx_buffer_offset);
-            }
         }
 
         rte_pktmbuf_free(mbuf);
@@ -833,16 +818,6 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     /* Copy data from RX buffer */
     if (conn->rx_buffer_offset > 0) {
         copied = (conn->rx_buffer_offset < len) ? conn->rx_buffer_offset : len;
-
-        if (g_dpdk_state->debug) {
-            printf("DPDK recv: copying %zd bytes from buffer (buffer has %u bytes, requested %zu)\n",
-                   copied, conn->rx_buffer_offset, len);
-            printf("DPDK recv: first 16 bytes of buffer: ");
-            for (int i = 0; i < (conn->rx_buffer_offset < 16 ? conn->rx_buffer_offset : 16); i++) {
-                printf("%02x ", (unsigned char)conn->rx_buffer[i]);
-            }
-            printf("\n");
-        }
 
         memcpy(buf, conn->rx_buffer, copied);
 
@@ -866,10 +841,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     /* Wait up to 5 seconds for data (100000 * 50us = 5s) */
     int attempts = 0;
     while (attempts < 100000 && conn->rx_buffer_offset == 0) {
-        /* Poll more aggressively for better responsiveness */
-        for (int i = 0; i < 10; i++) {
-            dpdk_process_packets();
-        }
+        /* Poll for packets - single call is sufficient */
+        dpdk_process_packets();
 
         /* Try to dequeue and process packets */
         while (conn->rx_buffer_offset < DPDK_RX_BUFFER_SIZE &&
@@ -899,18 +872,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
             payload_len = rte_pktmbuf_pkt_len(mbuf) - total_hdr_len;
 
             if (payload_len > 0 && conn->rx_buffer_offset + payload_len <= DPDK_RX_BUFFER_SIZE) {
-                if (g_dpdk_state->debug) {
-                    printf("DPDK recv (blocking): extracting %zu bytes, will copy to buffer offset %u\n",
-                           payload_len, conn->rx_buffer_offset);
-                }
-
                 rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
                 conn->rx_buffer_offset += payload_len;
-
-                if (g_dpdk_state->debug) {
-                    printf("DPDK recv (blocking): extracted %zu bytes payload from packet (total in buffer: %u)\n",
-                           payload_len, conn->rx_buffer_offset);
-                }
             }
 
             rte_pktmbuf_free(mbuf);
@@ -928,11 +891,6 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     /* Check if we got data after waiting */
     if (conn->rx_buffer_offset > 0) {
         copied = (conn->rx_buffer_offset < len) ? conn->rx_buffer_offset : len;
-
-        if (g_dpdk_state->debug) {
-            printf("DPDK recv (blocking): copying %zd bytes from buffer (buffer has %u bytes, requested %zu)\n",
-                   copied, conn->rx_buffer_offset, len);
-        }
 
         memcpy(buf, conn->rx_buffer, copied);
 
@@ -1647,9 +1605,6 @@ ssize_t dpdk_wrapped_read(int fd, void *buf, size_t count)
     if (fd >= 100 && g_dpdk_state) {
         struct dpdk_connection *conn = dpdk_get_connection(fd);
         if (conn) {
-            if (g_dpdk_state->debug) {
-                printf("DPDK wrapped_read: routing fd %d to dpdk_recv\n", fd);
-            }
             return dpdk_recv(fd, buf, count, 0);
         }
     }
@@ -1665,9 +1620,6 @@ ssize_t dpdk_wrapped_write(int fd, const void *buf, size_t count)
     if (fd >= 100 && g_dpdk_state) {
         struct dpdk_connection *conn = dpdk_get_connection(fd);
         if (conn) {
-            if (g_dpdk_state->debug) {
-                printf("DPDK wrapped_write: routing fd %d (len=%zu) to dpdk_send\n", fd, count);
-            }
             return dpdk_send(fd, buf, count, 0);
         }
     }
@@ -1781,10 +1733,6 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
             /* If DPDK sockets are ready, we can return immediately */
             if (dpdk_ready > 0) {
-                if (g_dpdk_state->debug) {
-                    printf("DPDK select: dpdk_ready=%d after %d poll iterations\\n",
-                           dpdk_ready, poll_iterations);
-                }
                 break;
             }
         }
@@ -1797,10 +1745,6 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
             if (elapsed_us >= timeout_us) {
                 /* Timeout expired */
-                if (g_dpdk_state->debug) {
-                    printf("DPDK select: timeout after %d poll iterations (%.3f seconds)\\n",
-                           poll_iterations, elapsed_us / 1000000.0);
-                }
                 break;
             }
         }
@@ -1836,11 +1780,6 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
                 }
             }
         }
-    }
-
-    if (g_dpdk_state->debug && (dpdk_ready > 0 || regular_ready > 0)) {
-        printf("DPDK select: dpdk_ready=%d regular_ready=%d total=%d\\n",
-               dpdk_ready, regular_ready, dpdk_ready + regular_ready);
     }
 
     return dpdk_ready + regular_ready;
