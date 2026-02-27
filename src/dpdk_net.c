@@ -747,8 +747,8 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
 
         total_sent += chunk_size;
 
-        /* Trigger TX burst when ring is getting full or when done */
-        if (rte_ring_count(conn->tx_ring) >= 128 || total_sent >= len) {
+        /* Trigger TX burst more frequently for lower latency */
+        if (rte_ring_count(conn->tx_ring) >= 32 || total_sent >= len) {
             dpdk_tx_burst(conn->port_id);
         }
     }
@@ -774,8 +774,10 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         return -1;
     }
 
-    /* Process incoming packets */
-    dpdk_process_packets();
+    /* Process incoming packets aggressively */
+    for (int i = 0; i < 10; i++) {
+        dpdk_process_packets();
+    }
 
     /* Try to get packets from rx_ring and extract payload */
     while (conn->rx_buffer_offset < DPDK_RX_BUFFER_SIZE &&
@@ -838,11 +840,14 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     }
 
     /* Blocking mode: wait for data to arrive */
-    /* Wait up to 5 seconds for data (100000 * 50us = 5s) */
+    /* Wait up to 5 seconds for data */
     int attempts = 0;
-    while (attempts < 100000 && conn->rx_buffer_offset == 0) {
-        /* Poll for packets - single call is sufficient */
-        dpdk_process_packets();
+    int max_attempts = 5000000; /* 5 seconds at ~1us per iteration */
+    while (attempts < max_attempts && conn->rx_buffer_offset == 0) {
+        /* Poll VERY aggressively to drain NIC RX queue */
+        for (int i = 0; i < 100; i++) {
+            dpdk_process_packets();
+        }
 
         /* Try to dequeue and process packets */
         while (conn->rx_buffer_offset < DPDK_RX_BUFFER_SIZE &&
@@ -884,8 +889,10 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         }
 
         attempts++;
-        /* Very short sleep to poll frequently */
-        usleep(50);
+        /* Only sleep every 1000 attempts to avoid excessive context switching */
+        if (attempts % 1000 == 0) {
+            usleep(1);
+        }
     }
 
     /* Check if we got data after waiting */
@@ -1696,8 +1703,8 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
         /* Process DPDK packets if we have DPDK sockets */
         if (has_dpdk_sockets) {
-            /* Call dpdk_process_packets multiple times for better responsiveness */
-            for (int i = 0; i < 10; i++) {
+            /* Call dpdk_process_packets MANY times for maximum throughput */
+            for (int i = 0; i < 100; i++) {
                 dpdk_process_packets();
             }
 
@@ -1751,8 +1758,8 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
         poll_iterations++;
 
-        /* Very short sleep to avoid busy-waiting while maintaining responsiveness */
-        usleep(100); /* 100us sleep - balance between CPU usage and latency */
+        /* Ultra-short sleep for low-latency polling */
+        usleep(1);
     }
 
     /* Handle regular sockets with select() if any */
