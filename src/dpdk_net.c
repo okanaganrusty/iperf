@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 
 #include <rte_cycles.h>
@@ -563,7 +564,7 @@ int dpdk_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
         /* In a real implementation, wait for SYN-ACK */
         conn->state = DPDK_CONN_STATE_ESTABLISHED;
         conn->connected = 1;
-        
+
         if (g_dpdk_state->debug) {
             char remote_ip[INET_ADDRSTRLEN];
             struct sockaddr_in *remote_sin = (struct sockaddr_in *)&conn->remote_addr;
@@ -594,7 +595,7 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
         errno = EBADF;
         return -1;
     }
-    
+
     if (!conn->connected) {
         if (g_dpdk_state && g_dpdk_state->debug) {
             printf("DPDK send: Socket %d not connected (state=%d)\n", sockfd, conn->state);
@@ -604,7 +605,7 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
     }
 
     if (g_dpdk_state && g_dpdk_state->debug) {
-        printf("DPDK send: sockfd=%d len=%zu connected=%d state=%d\n", 
+        printf("DPDK send: sockfd=%d len=%zu connected=%d state=%d\n",
                sockfd, len, conn->connected, conn->state);
     }
 
@@ -1241,4 +1242,40 @@ void dpdk_enable_packet_dump(int enable)
             printf("DPDK packet dumping disabled\n");
         }
     }
+}
+
+/* Wrapper for read() that detects DPDK sockets */
+ssize_t dpdk_wrapped_read(int fd, void *buf, size_t count)
+{
+    /* DPDK sockets use fd >= 100 */
+    if (fd >= 100 && g_dpdk_state) {
+        struct dpdk_connection *conn = dpdk_get_connection(fd);
+        if (conn) {
+            if (g_dpdk_state->debug) {
+                printf("DPDK wrapped_read: routing fd %d to dpdk_recv\n", fd);
+            }
+            return dpdk_recv(fd, buf, count, 0);
+        }
+    }
+
+    /* Not a DPDK socket, use real system call */
+    return read(fd, buf, count);
+}
+
+/* Wrapper for write() that detects DPDK sockets */
+ssize_t dpdk_wrapped_write(int fd, const void *buf, size_t count)
+{
+    /* DPDK sockets use fd >= 100 */
+    if (fd >= 100 && g_dpdk_state) {
+        struct dpdk_connection *conn = dpdk_get_connection(fd);
+        if (conn) {
+            if (g_dpdk_state->debug) {
+                printf("DPDK wrapped_write: routing fd %d (len=%zu) to dpdk_send\n", fd, count);
+            }
+            return dpdk_send(fd, buf, count, 0);
+        }
+    }
+
+    /* Not a DPDK socket, use real system call */
+    return write(fd, buf, count);
 }

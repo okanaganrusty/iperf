@@ -13,6 +13,11 @@
 
 #include "dpdk_net.h"
 #include <sys/socket.h>
+#include <unistd.h>
+
+/* Forward declarations for wrapper functions */
+ssize_t dpdk_wrapped_read(int fd, void *buf, size_t count);
+ssize_t dpdk_wrapped_write(int fd, const void *buf, size_t count);
 
 /* Replace standard socket functions with DPDK equivalents */
 #define socket(domain, type, protocol) dpdk_socket(domain, type, protocol)
@@ -37,9 +42,9 @@
 #define accept(sockfd, addr, addrlen) dpdk_accept(sockfd, addr, addrlen)
 #define connect(sockfd, addr, addrlen) dpdk_connect(sockfd, addr, addrlen)
 
-/* Special handling for read/write as they're also used for files */
-#define socket_read(sockfd, buf, count) dpdk_recv(sockfd, buf, count, 0)
-#define socket_write(sockfd, buf, count) dpdk_send(sockfd, buf, count, 0)
+/* Wrap read/write to detect DPDK sockets */
+#define read(fd, buf, count) dpdk_wrapped_read(fd, buf, count)
+#define write(fd, buf, count) dpdk_wrapped_write(fd, buf, count)
 
 #endif /* HAVE_DPDK */
 
