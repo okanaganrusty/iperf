@@ -868,8 +868,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
            rte_ring_dequeue(conn->rx_ring, (void **)&mbuf) == 0) {
         struct rte_ether_hdr *eth_hdr;
         struct rte_ipv4_hdr *ip_hdr;
-        struct rte_tcp_hdr *tcp_hdr;
-        struct rte_udp_hdr *udp_hdr;
+        struct rte_tcp_hdr *tcp_hdr = NULL;
+        struct rte_udp_hdr *udp_hdr = NULL;
         char *payload;
         size_t payload_len;
         size_t total_hdr_len;
@@ -1283,12 +1283,14 @@ int dpdk_rx_burst(uint16_t port_id)
                 char *payload = NULL;
 
                 if (protocol == DPDK_PROTO_TCP) {
-                    uint8_t tcp_hdr_len = (tcp_hdr->data_off >> 4) * 4;
+                    struct rte_tcp_hdr *payload_tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                    uint8_t tcp_hdr_len = (payload_tcp_hdr->data_off >> 4) * 4;
                     total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + tcp_hdr_len;
-                    payload = (char *)tcp_hdr + tcp_hdr_len;
+                    payload = (char *)payload_tcp_hdr + tcp_hdr_len;
                 } else {
-                    total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*udp_hdr);
-                    payload = (char *)(udp_hdr + 1);
+                    struct rte_udp_hdr *payload_udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+                    total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*payload_udp_hdr);
+                    payload = (char *)(payload_udp_hdr + 1);
                 }
 
                 if (rte_pktmbuf_pkt_len(bufs[i]) >= total_hdr_len) {
