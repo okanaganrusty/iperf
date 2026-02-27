@@ -1650,10 +1650,20 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
     int dpdk_ready = 0, regular_ready = 0;
     int has_dpdk_sockets = 0, has_regular_sockets = 0;
     struct timeval short_timeout = {0, 1000}; /* 1ms for DPDK polling */
+    struct timeval start_time, current_time;
+    uint64_t timeout_us = 0;
+    uint64_t elapsed_us = 0;
+    int poll_iterations = 0;
 
     if (!g_dpdk_state) {
         /* No DPDK initialized, use regular select */
         return select(nfds, readfds, writefds, exceptfds, timeout);
+    }
+
+    /* Calculate timeout in microseconds */
+    if (timeout) {
+        timeout_us = (uint64_t)timeout->tv_sec * 1000000 + timeout->tv_usec;
+        gettimeofday(&start_time, NULL);
     }
 
     /* Initialize fd_sets */
@@ -1694,39 +1704,77 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
         }
     }
 
-    /* Process DPDK packets if we have DPDK sockets */
-    if (has_dpdk_sockets) {
-        dpdk_process_packets();
+    /* Poll for DPDK sockets until timeout or data arrives */
+    while (1) {
+        dpdk_ready = 0;
 
-        /* Check DPDK sockets for readiness */
-        for (fd = 100; fd < nfds; fd++) {
-            struct dpdk_connection *conn = dpdk_get_connection(fd);
-            if (!conn) continue;
+        /* Process DPDK packets if we have DPDK sockets */
+        if (has_dpdk_sockets) {
+            /* Call dpdk_process_packets multiple times for better responsiveness */
+            for (int i = 0; i < 10; i++) {
+                dpdk_process_packets();
+            }
 
-            /* Check if socket is readable (has data in rx_ring or rx_buffer) */
-            if (FD_ISSET(fd, &dpdk_readfds)) {
-                unsigned int count = 0;
-                if (conn->rx_ring) {
-                    count = rte_ring_count(conn->rx_ring);
+            /* Check DPDK sockets for readiness */
+            for (fd = 100; fd < nfds; fd++) {
+                struct dpdk_connection *conn = dpdk_get_connection(fd);
+                if (!conn) continue;
+
+                /* Check if socket is readable (has data in rx_ring or rx_buffer) */
+                if (FD_ISSET(fd, &dpdk_readfds)) {
+                    unsigned int count = 0;
+                    if (conn->rx_ring) {
+                        count = rte_ring_count(conn->rx_ring);
+                    }
+                    if (count > 0 || conn->rx_buffer_offset > 0) {
+                        dpdk_ready++;
+                        if (readfds) FD_SET(fd, readfds);
+                    } else {
+                        if (readfds) FD_CLR(fd, readfds);
+                    }
                 }
-                if (count > 0 || conn->rx_buffer_offset > 0) {
-                    dpdk_ready++;
-                    if (readfds) FD_SET(fd, readfds);
-                } else {
-                    if (readfds) FD_CLR(fd, readfds);
+
+                /* Check if socket is writable (connected and tx_ring not full) */
+                if (FD_ISSET(fd, &dpdk_writefds)) {
+                    if (conn->connected) {
+                        dpdk_ready++;
+                        if (writefds) FD_SET(fd, writefds);
+                    } else {
+                        if (writefds) FD_CLR(fd, writefds);
+                    }
                 }
             }
 
-            /* Check if socket is writable (connected and tx_ring not full) */
-            if (FD_ISSET(fd, &dpdk_writefds)) {
-                if (conn->connected) {
-                    dpdk_ready++;
-                    if (writefds) FD_SET(fd, writefds);
-                } else {
-                    if (writefds) FD_CLR(fd, writefds);
+            /* If DPDK sockets are ready, we can return immediately */
+            if (dpdk_ready > 0) {
+                if (g_dpdk_state->debug) {
+                    printf("DPDK select: dpdk_ready=%d after %d poll iterations\\n",
+                           dpdk_ready, poll_iterations);
                 }
+                break;
             }
         }
+
+        /* Check timeout if specified */
+        if (timeout) {
+            gettimeofday(&current_time, NULL);
+            elapsed_us = (current_time.tv_sec - start_time.tv_sec) * 1000000 +
+                        (current_time.tv_usec - start_time.tv_usec);
+
+            if (elapsed_us >= timeout_us) {
+                /* Timeout expired */
+                if (g_dpdk_state->debug) {
+                    printf("DPDK select: timeout after %d poll iterations (%.3f seconds)\\n",
+                           poll_iterations, elapsed_us / 1000000.0);
+                }
+                break;
+            }
+        }
+
+        poll_iterations++;
+
+        /* Short sleep to avoid busy-waiting */
+        usleep(1000); /* 1ms sleep */
     }
 
     /* Handle regular sockets with select() if any */
