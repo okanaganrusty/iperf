@@ -1155,6 +1155,11 @@ int dpdk_rx_burst(uint16_t port_id)
                 src_port == remote_sin->sin_port &&
                 dst_port == local_sin->sin_port) {
                 /* This packet is for this connection */
+                if (g_dpdk_state->debug && protocol == DPDK_PROTO_TCP) {
+                    struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                    printf("DPDK RX: Routed seq=%u to ESTABLISHED connection fd=%d\n",
+                           rte_be_to_cpu_32(tcp->sent_seq), conn->fd);
+                }
                 if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
                     if (g_dpdk_state->debug) {
                         printf("DPDK RX: rx_ring full for connection %d\n", conn->fd);
@@ -1177,6 +1182,11 @@ int dpdk_rx_burst(uint16_t port_id)
                 struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
                 if (dst_port == local_sin->sin_port) {
                     /* This is for our listening socket */
+                    if (g_dpdk_state->debug) {
+                        struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                        printf("DPDK RX: Routed seq=%u to LISTENING socket fd=%d\n",
+                               rte_be_to_cpu_32(tcp->sent_seq), conn->fd);
+                    }
                     if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
                         if (g_dpdk_state->debug) {
                             printf("DPDK RX: rx_ring full for listening socket %d\n", conn->fd);
