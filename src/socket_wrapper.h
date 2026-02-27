@@ -14,11 +14,12 @@
 #include "dpdk_net.h"
 
 /* Replace standard socket functions with DPDK equivalents */
+/* Note: accept, listen, connect are NOT macros to avoid conflicts with protocol function pointers */
 #define socket(domain, type, protocol) dpdk_socket(domain, type, protocol)
 #define bind(sockfd, addr, addrlen) dpdk_bind(sockfd, addr, addrlen)
-#define listen(sockfd, backlog) dpdk_listen(sockfd, backlog)
-#define accept(sockfd, addr, addrlen) dpdk_accept(sockfd, addr, addrlen)
-#define connect(sockfd, addr, addrlen) dpdk_connect(sockfd, addr, addrlen)
+/* #define listen(sockfd, backlog) dpdk_listen(sockfd, backlog) */
+/* #define accept(sockfd, addr, addrlen) dpdk_accept(sockfd, addr, addrlen) */
+/* #define connect(sockfd, addr, addrlen) dpdk_connect(sockfd, addr, addrlen) */
 #define send(sockfd, buf, len, flags) dpdk_send(sockfd, buf, len, flags)
 #define recv(sockfd, buf, len, flags) dpdk_recv(sockfd, buf, len, flags)
 #define sendto(sockfd, buf, len, flags, dest_addr, addrlen) dpdk_sendto(sockfd, buf, len, flags, dest_addr, addrlen)

@@ -1814,7 +1814,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
             case OPT_DPDK_IP:
                 test->dpdk_ip_addr = strdup(optarg);
                 if (!test->dpdk_ip_addr) {
-                    i_errno = IENOMEMORY;
+                    i_errno = IENEWTEST;
                     return -1;
                 }
                 break;

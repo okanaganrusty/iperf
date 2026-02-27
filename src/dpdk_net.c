@@ -1002,6 +1002,7 @@ static int dpdk_send_tcp_syn(struct dpdk_connection *conn)
 }
 
 /* Helper: Send TCP ACK */
+__attribute__((unused))
 static int dpdk_send_tcp_ack(struct dpdk_connection *conn)
 {
     struct rte_mbuf *mbuf;
@@ -1019,14 +1020,20 @@ static int dpdk_send_tcp_ack(struct dpdk_connection *conn)
 }
 
 /* Placeholder packet handlers */
+__attribute__((unused))
 static void dpdk_handle_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf)
 {
     /* Parse TCP packet and update connection state */
     /* Extract payload and add to RX buffer */
+    (void)conn;  /* Suppress unused parameter warning */
+    (void)mbuf;  /* Suppress unused parameter warning */
 }
 
+__attribute__((unused))
 static void dpdk_handle_udp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf)
 {
     /* Parse UDP packet and extract payload */
     /* Add to RX buffer */
+    (void)conn;  /* Suppress unused parameter warning */
+    (void)mbuf;  /* Suppress unused parameter warning */
 }
