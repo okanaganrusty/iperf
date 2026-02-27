@@ -794,6 +794,76 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         return -1;
     }
 
+    /* Blocking mode: wait for data to arrive */
+    /* For now, do a few more attempts to recv packets */
+    int attempts = 0;
+    while (attempts < 1000 && conn->rx_buffer_offset == 0) {
+        dpdk_process_packets();
+
+        /* Try to dequeue and process packets */
+        while (conn->rx_buffer_offset < DPDK_RX_BUFFER_SIZE &&
+               rte_ring_dequeue(conn->rx_ring, (void **)&mbuf) == 0) {
+            struct rte_ether_hdr *eth_hdr;
+            struct rte_ipv4_hdr *ip_hdr;
+            struct rte_tcp_hdr *tcp_hdr;
+            struct rte_udp_hdr *udp_hdr;
+            char *payload;
+            size_t payload_len;
+            size_t total_hdr_len;
+
+            eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr *);
+            ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+
+            if (conn->protocol == DPDK_PROTO_TCP) {
+                tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                uint8_t tcp_hdr_len = (tcp_hdr->data_off >> 4) * 4;
+                payload = (char *)tcp_hdr + tcp_hdr_len;
+                total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + tcp_hdr_len;
+            } else {
+                udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+                payload = (char *)(udp_hdr + 1);
+                total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*udp_hdr);
+            }
+
+            payload_len = rte_pktmbuf_pkt_len(mbuf) - total_hdr_len;
+
+            if (payload_len > 0 && conn->rx_buffer_offset + payload_len <= DPDK_RX_BUFFER_SIZE) {
+                rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
+                conn->rx_buffer_offset += payload_len;
+
+                if (g_dpdk_state->debug) {
+                    printf("DPDK recv: extracted %zu bytes payload from packet (total in buffer: %u)\n",
+                           payload_len, conn->rx_buffer_offset);
+                }
+            }
+
+            rte_pktmbuf_free(mbuf);
+        }
+
+        if (conn->rx_buffer_offset > 0) {
+            break;
+        }
+
+        attempts++;
+        /* Small sleep to avoid busy-waiting */
+        usleep(100);
+    }
+
+    /* Check if we got data after waiting */
+    if (conn->rx_buffer_offset > 0) {
+        copied = (conn->rx_buffer_offset < len) ? conn->rx_buffer_offset : len;
+        memcpy(buf, conn->rx_buffer, copied);
+
+        if (copied < conn->rx_buffer_offset) {
+            memmove(conn->rx_buffer, conn->rx_buffer + copied,
+                    conn->rx_buffer_offset - copied);
+        }
+        conn->rx_buffer_offset -= copied;
+
+        return copied;
+    }
+
+    /* Still no data after waiting */
     errno = EAGAIN;
     return -1;
 }
