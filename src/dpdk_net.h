@@ -113,10 +113,14 @@ struct dpdk_state {
     uint64_t tx_bytes;
     uint64_t rx_errors;
     uint64_t tx_errors;
+
+    /* Debug flags */
+    int debug;                       /* Enable debug output */
+    int packet_dump;                 /* Enable packet dumping */
 };
 
 /* DPDK initialization and cleanup */
-int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, const char *netmask);
+int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, const char *netmask, int debug);
 int dpdk_net_cleanup(void);
 int dpdk_net_configure_port(uint16_t port_id);
 
@@ -156,6 +160,8 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
                            const void *data, size_t len, uint8_t flags);
 int dpdk_create_udp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
                            const void *data, size_t len);
+void dpdk_dump_packet(const char *prefix, struct rte_mbuf *mbuf);
+void dpdk_enable_packet_dump(int enable);
 
 /* Helper macros */
 #define DPDK_TCP_FLAG_FIN 0x01

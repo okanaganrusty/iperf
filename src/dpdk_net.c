@@ -32,7 +32,7 @@ static int dpdk_send_tcp_syn(struct dpdk_connection *conn);
 static int dpdk_send_tcp_ack(struct dpdk_connection *conn);
 
 /* Initialize DPDK */
-int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, const char *netmask)
+int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, const char *netmask, int debug)
 {
     int ret;
     char pool_name[32];
@@ -55,6 +55,8 @@ int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, 
 
     g_dpdk_state->port_id = port_id;
     g_dpdk_state->next_fd = 100; /* Start from 100 to avoid conflicts */
+    g_dpdk_state->debug = debug;
+    g_dpdk_state->packet_dump = (debug > 0); /* Enable packet dump if debug enabled */
 
     /* Create packet buffer pool */
     snprintf(pool_name, sizeof(pool_name), "mbuf_pool_%u", port_id);
@@ -126,6 +128,19 @@ int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, 
            g_dpdk_state->mac_addr.addr_bytes[3],
            g_dpdk_state->mac_addr.addr_bytes[4],
            g_dpdk_state->mac_addr.addr_bytes[5]);
+
+    /* Log IP configuration */
+    if (g_dpdk_state->ipv4_addr != 0) {
+        char ip_str[INET_ADDRSTRLEN];
+        char mask_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &g_dpdk_state->ipv4_addr, ip_str, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &g_dpdk_state->ipv4_netmask, mask_str, INET_ADDRSTRLEN);
+        printf("DPDK IP Configuration: %s netmask %s\n", ip_str, mask_str);
+
+        if (debug) {
+            printf("DPDK Debug: Packet dumping enabled\n");
+        }
+    }
 
     return 0;
 }
@@ -813,6 +828,11 @@ int dpdk_rx_burst(uint16_t port_id)
     for (i = 0; i < nb_rx; i++) {
         g_dpdk_state->rx_bytes += rte_pktmbuf_pkt_len(bufs[i]);
 
+        /* Dump packet if debug enabled */
+        if (g_dpdk_state->packet_dump) {
+            dpdk_dump_packet("RX", bufs[i]);
+        }
+
         /* Process packet - simplified */
         /* In real implementation: parse Ethernet, IP, TCP/UDP headers */
         /* and route to appropriate connection */
@@ -842,6 +862,13 @@ int dpdk_tx_burst(uint16_t port_id)
     }
 
     if (nb_tx > 0) {
+        /* Dump packets if debug enabled */
+        if (g_dpdk_state->packet_dump) {
+            for (i = 0; i < nb_tx; i++) {
+                dpdk_dump_packet("TX", bufs[i]);
+            }
+        }
+
         uint16_t sent = rte_eth_tx_burst(port_id, 0, bufs, nb_tx);
 
         g_dpdk_state->tx_packets += sent;
@@ -1047,4 +1074,91 @@ static void dpdk_handle_udp_packet(struct dpdk_connection *conn, struct rte_mbuf
     /* Add to RX buffer */
     (void)conn;  /* Suppress unused parameter warning */
     (void)mbuf;  /* Suppress unused parameter warning */
+}
+
+/* Dump packet contents for debugging */
+void dpdk_dump_packet(const char *prefix, struct rte_mbuf *mbuf)
+{
+    struct rte_ether_hdr *eth_hdr;
+    struct rte_ipv4_hdr *ip_hdr;
+    struct rte_tcp_hdr *tcp_hdr;
+    struct rte_udp_hdr *udp_hdr;
+    uint8_t *data;
+    uint16_t ether_type;
+    uint8_t ip_proto;
+    int i;
+
+    if (!mbuf || !g_dpdk_state) {
+        return;
+    }
+
+    /* Get Ethernet header */
+    eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr *);
+    ether_type = rte_be_to_cpu_16(eth_hdr->ether_type);
+
+    printf("=== %s Packet (len=%u) ===\n", prefix, rte_pktmbuf_pkt_len(mbuf));
+    printf("Ethernet: src=%02x:%02x:%02x:%02x:%02x:%02x dst=%02x:%02x:%02x:%02x:%02x:%02x type=0x%04x\n",
+           eth_hdr->src_addr.addr_bytes[0], eth_hdr->src_addr.addr_bytes[1],
+           eth_hdr->src_addr.addr_bytes[2], eth_hdr->src_addr.addr_bytes[3],
+           eth_hdr->src_addr.addr_bytes[4], eth_hdr->src_addr.addr_bytes[5],
+           eth_hdr->dst_addr.addr_bytes[0], eth_hdr->dst_addr.addr_bytes[1],
+           eth_hdr->dst_addr.addr_bytes[2], eth_hdr->dst_addr.addr_bytes[3],
+           eth_hdr->dst_addr.addr_bytes[4], eth_hdr->dst_addr.addr_bytes[5],
+           ether_type);
+
+    /* Check if IPv4 */
+    if (ether_type == RTE_ETHER_TYPE_IPV4) {
+        ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+        ip_proto = ip_hdr->next_proto_id;
+
+        char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &ip_hdr->src_addr, src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &ip_hdr->dst_addr, dst_ip, INET_ADDRSTRLEN);
+
+        printf("IPv4: src=%s dst=%s proto=%u ttl=%u len=%u\n",
+               src_ip, dst_ip, ip_proto, ip_hdr->time_to_live,
+               rte_be_to_cpu_16(ip_hdr->total_length));
+
+        /* Check protocol */
+        if (ip_proto == DPDK_PROTO_TCP) {
+            tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+            printf("TCP: sport=%u dport=%u seq=%u ack=%u flags=0x%02x win=%u\n",
+                   rte_be_to_cpu_16(tcp_hdr->src_port),
+                   rte_be_to_cpu_16(tcp_hdr->dst_port),
+                   rte_be_to_cpu_32(tcp_hdr->sent_seq),
+                   rte_be_to_cpu_32(tcp_hdr->recv_ack),
+                   tcp_hdr->tcp_flags,
+                   rte_be_to_cpu_16(tcp_hdr->rx_win));
+        } else if (ip_proto == DPDK_PROTO_UDP) {
+            udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+            printf("UDP: sport=%u dport=%u len=%u\n",
+                   rte_be_to_cpu_16(udp_hdr->src_port),
+                   rte_be_to_cpu_16(udp_hdr->dst_port),
+                   rte_be_to_cpu_16(udp_hdr->dgram_len));
+        }
+    }
+
+    /* Dump first 64 bytes of packet data in hex */
+    data = rte_pktmbuf_mtod(mbuf, uint8_t *);
+    printf("Data (first 64 bytes): ");
+    for (i = 0; i < 64 && i < (int)rte_pktmbuf_pkt_len(mbuf); i++) {
+        if (i > 0 && i % 16 == 0) {
+            printf("\n                       ");
+        }
+        printf("%02x ", data[i]);
+    }
+    printf("\n");
+}
+
+/* Enable or disable packet dumping */
+void dpdk_enable_packet_dump(int enable)
+{
+    if (g_dpdk_state) {
+        g_dpdk_state->packet_dump = enable;
+        if (enable) {
+            printf("DPDK packet dumping enabled\n");
+        } else {
+            printf("DPDK packet dumping disabled\n");
+        }
+    }
 }
