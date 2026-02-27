@@ -121,7 +121,22 @@ main(int argc, char **argv)
         iperf_errexit(NULL, "create new test error - %s", iperf_strerror(i_errno));
     iperf_defaults(test);	/* sets defaults */
 
+#ifdef HAVE_DPDK
+    /* Find the -- separator for DPDK EAL arguments */
+    int dpdk_arg_start = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) {
+            dpdk_arg_start = i;
+            break;
+        }
+    }
+
+    /* Parse iperf3 arguments (before --) */
+    int iperf_argc = dpdk_arg_start > 0 ? dpdk_arg_start : argc;
+    if (iperf_parse_arguments(test, iperf_argc, argv) < 0) {
+#else
     if (iperf_parse_arguments(test, argc, argv) < 0) {
+#endif
         iperf_err(test, "parameter error - %s", iperf_strerror(i_errno));
         fprintf(stderr, "\n");
         usage();
@@ -131,6 +146,25 @@ main(int argc, char **argv)
 #ifdef HAVE_DPDK
     /* Initialize DPDK if enabled */
     if (test->dpdk_enabled) {
+        /* Prepare DPDK EAL arguments */
+        if (dpdk_arg_start > 0 && dpdk_arg_start < argc - 1) {
+            /* We have DPDK arguments after -- */
+            test->dpdk_argc = argc - dpdk_arg_start;
+            test->dpdk_argv = &argv[dpdk_arg_start];
+        } else {
+            /* No -- separator, provide minimal default arguments */
+            static char *default_dpdk_argv[] = {
+                "iperf3",
+                "-l", "0",
+                "-n", "4",
+                "--proc-type=primary",
+                NULL
+            };
+            test->dpdk_argc = 6;
+            test->dpdk_argv = default_dpdk_argv;
+            fprintf(stderr, "Warning: No DPDK EAL arguments provided after '--', using defaults\n");
+        }
+
         if (dpdk_net_init(test->dpdk_argc, test->dpdk_argv,
                           test->dpdk_port_id, test->dpdk_ip_addr) < 0) {
             iperf_errexit(test, "DPDK initialization failed");
