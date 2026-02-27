@@ -454,6 +454,10 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
     int new_fd;
     struct dpdk_connection *new_conn;
     int idx;
+    struct rte_ether_hdr *eth_hdr;
+    struct rte_ipv4_hdr *ip_hdr;
+    struct rte_tcp_hdr *tcp_hdr;
+    struct sockaddr_in remote_addr;
 
     conn = dpdk_get_connection(sockfd);
     if (!conn || !conn->listening) {
@@ -461,12 +465,22 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
         return -1;
     }
 
-    /* Poll for packets - simplified version */
-    /* In a real implementation, this would wait for SYN packets */
+    /* Poll for packets */
     dpdk_process_packets();
 
     /* Check if there are any pending connections in the RX ring */
     if (rte_ring_dequeue(conn->rx_ring, (void **)&mbuf) == 0) {
+        /* Parse the packet to extract remote address */
+        eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr *);
+        ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+        tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+
+        /* Extract remote address from packet */
+        memset(&remote_addr, 0, sizeof(remote_addr));
+        remote_addr.sin_family = AF_INET;
+        remote_addr.sin_addr.s_addr = ip_hdr->src_addr;
+        remote_addr.sin_port = tcp_hdr->src_port;
+
         /* Create new connection for accepted socket */
         for (idx = 0; idx < DPDK_MAX_CONNECTIONS; idx++) {
             if (g_dpdk_state->connections[idx] == NULL) {
@@ -492,18 +506,29 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
         new_conn->state = DPDK_CONN_STATE_ESTABLISHED;
         new_conn->connected = 1;
         new_conn->parent_fd = sockfd;
+        new_conn->port_id = conn->port_id;
 
         /* Copy local address from listener */
         memcpy(&new_conn->local_addr, &conn->local_addr, conn->local_addr_len);
         new_conn->local_addr_len = conn->local_addr_len;
 
-        /* Extract remote address from packet - simplified */
-        /* In real implementation, parse IP header */
+        /* Set remote address from packet */
+        memcpy(&new_conn->remote_addr, &remote_addr, sizeof(remote_addr));
+        new_conn->remote_addr_len = sizeof(remote_addr);
 
         g_dpdk_state->connections[idx] = new_conn;
 
         if (addr && addrlen) {
-            memcpy(addr, &new_conn->remote_addr, *addrlen);
+            socklen_t copy_len = *addrlen < sizeof(remote_addr) ? *addrlen : sizeof(remote_addr);
+            memcpy(addr, &remote_addr, copy_len);
+            *addrlen = copy_len;
+        }
+
+        if (g_dpdk_state->debug) {
+            char remote_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &remote_addr.sin_addr, remote_ip, INET_ADDRSTRLEN);
+            printf("DPDK accept: new connection fd=%d from %s:%u\n",
+                   new_fd, remote_ip, rte_be_to_cpu_16(remote_addr.sin_port));
         }
 
         rte_pktmbuf_free(mbuf);
@@ -648,6 +673,7 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
 ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
 {
     struct dpdk_connection *conn;
+    struct rte_mbuf *mbuf;
     ssize_t copied = 0;
 
     conn = dpdk_get_connection(sockfd);
@@ -658,6 +684,49 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
 
     /* Process incoming packets */
     dpdk_process_packets();
+
+    /* Try to get packets from rx_ring and extract payload */
+    while (conn->rx_buffer_offset < DPDK_RX_BUFFER_SIZE &&
+           rte_ring_dequeue(conn->rx_ring, (void **)&mbuf) == 0) {
+        struct rte_ether_hdr *eth_hdr;
+        struct rte_ipv4_hdr *ip_hdr;
+        struct rte_tcp_hdr *tcp_hdr;
+        struct rte_udp_hdr *udp_hdr;
+        char *payload;
+        size_t payload_len;
+        size_t total_hdr_len;
+
+        /* Parse headers */
+        eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr *);
+        ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+
+        if (conn->protocol == DPDK_PROTO_TCP) {
+            tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+            uint8_t tcp_hdr_len = (tcp_hdr->data_off >> 4) * 4;
+            payload = (char *)tcp_hdr + tcp_hdr_len;
+            total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + tcp_hdr_len;
+        } else {
+            udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+            payload = (char *)(udp_hdr + 1);
+            total_hdr_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*udp_hdr);
+        }
+
+        /* Calculate payload length */
+        payload_len = rte_pktmbuf_pkt_len(mbuf) - total_hdr_len;
+
+        /* Copy payload to rx_buffer if there's space */
+        if (payload_len > 0 && conn->rx_buffer_offset + payload_len <= DPDK_RX_BUFFER_SIZE) {
+            rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
+            conn->rx_buffer_offset += payload_len;
+
+            if (g_dpdk_state->debug) {
+                printf("DPDK recv: extracted %zu bytes payload from packet (total in buffer: %u)\n",
+                       payload_len, conn->rx_buffer_offset);
+            }
+        }
+
+        rte_pktmbuf_free(mbuf);
+    }
 
     /* Copy data from RX buffer */
     if (conn->rx_buffer_offset > 0) {
@@ -869,13 +938,21 @@ int dpdk_rx_burst(uint16_t port_id)
 {
     struct rte_mbuf *bufs[DPDK_MAX_RX_BURST];
     uint16_t nb_rx;
-    int i;
+    int i, idx;
 
     nb_rx = rte_eth_rx_burst(port_id, 0, bufs, DPDK_MAX_RX_BURST);
 
     g_dpdk_state->rx_packets += nb_rx;
 
     for (i = 0; i < nb_rx; i++) {
+        struct rte_ether_hdr *eth_hdr;
+        struct rte_ipv4_hdr *ip_hdr;
+        struct rte_tcp_hdr *tcp_hdr;
+        struct rte_udp_hdr *udp_hdr;
+        uint16_t src_port, dst_port;
+        uint8_t protocol;
+        int matched = 0;
+
         g_dpdk_state->rx_bytes += rte_pktmbuf_pkt_len(bufs[i]);
 
         /* Dump packet if debug enabled */
@@ -883,11 +960,84 @@ int dpdk_rx_burst(uint16_t port_id)
             dpdk_dump_packet("RX", bufs[i]);
         }
 
-        /* Process packet - simplified */
-        /* In real implementation: parse Ethernet, IP, TCP/UDP headers */
-        /* and route to appropriate connection */
+        /* Parse packet headers */
+        eth_hdr = rte_pktmbuf_mtod(bufs[i], struct rte_ether_hdr *);
+        if (rte_be_to_cpu_16(eth_hdr->ether_type) != RTE_ETHER_TYPE_IPV4) {
+            rte_pktmbuf_free(bufs[i]);
+            continue;
+        }
 
-        rte_pktmbuf_free(bufs[i]);
+        ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+        protocol = ip_hdr->next_proto_id;
+
+        if (protocol == DPDK_PROTO_TCP) {
+            tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+            src_port = tcp_hdr->src_port;
+            dst_port = tcp_hdr->dst_port;
+        } else if (protocol == DPDK_PROTO_UDP) {
+            udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+            src_port = udp_hdr->src_port;
+            dst_port = udp_hdr->dst_port;
+        } else {
+            rte_pktmbuf_free(bufs[i]);
+            continue;
+        }
+
+        /* Route packet to appropriate connection */
+        for (idx = 0; idx < DPDK_MAX_CONNECTIONS; idx++) {
+            struct dpdk_connection *conn = g_dpdk_state->connections[idx];
+            if (!conn) {
+                continue;
+            }
+
+            /* Check if this is for a listening socket (SYN packet) */
+            if (conn->listening && protocol == DPDK_PROTO_TCP) {
+                struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
+                if (dst_port == local_sin->sin_port) {
+                    /* This is for our listening socket */
+                    if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
+                        if (g_dpdk_state->debug) {
+                            printf("DPDK RX: rx_ring full for listening socket %d\n", conn->fd);
+                        }
+                        rte_pktmbuf_free(bufs[i]);
+                    }
+                    matched = 1;
+                    break;
+                }
+            }
+
+            /* Check if this is for an established connection */
+            if (conn->connected) {
+                struct sockaddr_in *remote_sin = (struct sockaddr_in *)&conn->remote_addr;
+                struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
+
+                if (ip_hdr->src_addr == remote_sin->sin_addr.s_addr &&
+                    src_port == remote_sin->sin_port &&
+                    dst_port == local_sin->sin_port) {
+                    /* This packet is for this connection */
+                    if (rte_ring_enqueue(conn->rx_ring, bufs[i]) < 0) {
+                        if (g_dpdk_state->debug) {
+                            printf("DPDK RX: rx_ring full for connection %d\n", conn->fd);
+                        }
+                        rte_pktmbuf_free(bufs[i]);
+                    }
+                    matched = 1;
+                    break;
+                }
+            }
+        }
+
+        if (!matched) {
+            /* No matching connection found */
+            if (g_dpdk_state->debug) {
+                char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &ip_hdr->src_addr, src_ip, INET_ADDRSTRLEN);
+                inet_ntop(AF_INET, &ip_hdr->dst_addr, dst_ip, INET_ADDRSTRLEN);
+                printf("DPDK RX: No matching connection for %s:%u -> %s:%u proto=%u\n",
+                       src_ip, rte_be_to_cpu_16(src_port), dst_ip, rte_be_to_cpu_16(dst_port), protocol);
+            }
+            rte_pktmbuf_free(bufs[i]);
+        }
     }
 
     return nb_rx;
