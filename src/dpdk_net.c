@@ -518,6 +518,14 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 
         g_dpdk_state->connections[idx] = new_conn;
 
+        /* First, enqueue the initial packet (used to extract remote addr) to the new connection */
+        if (rte_ring_enqueue(new_conn->rx_ring, mbuf) < 0) {
+            if (g_dpdk_state->debug) {
+                printf("DPDK accept: failed to enqueue first packet to new connection\n");
+            }
+            rte_pktmbuf_free(mbuf);
+        }
+
         /* Transfer any remaining packets from listener that match the new connection */
         struct rte_mbuf *temp_bufs[DPDK_RX_RING_SIZE];
         unsigned int temp_count = 0;
@@ -554,14 +562,6 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
             if (rte_ring_enqueue(conn->rx_ring, temp_bufs[i]) < 0) {
                 rte_pktmbuf_free(temp_bufs[i]);
             }
-        }
-
-        /* Also enqueue the first packet (used to extract remote addr) to the new connection */
-        if (rte_ring_enqueue(new_conn->rx_ring, mbuf) < 0) {
-            if (g_dpdk_state->debug) {
-                printf("DPDK accept: failed to enqueue first packet to new connection\n");
-            }
-            rte_pktmbuf_free(mbuf);
         }
 
         if (addr && addrlen) {
