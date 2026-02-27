@@ -775,7 +775,7 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     }
 
     /* Process incoming packets aggressively */
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 5; i++) {
         dpdk_process_packets();
     }
 
@@ -844,8 +844,8 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     int attempts = 0;
     int max_attempts = 5000000; /* 5 seconds at ~1us per iteration */
     while (attempts < max_attempts && conn->rx_buffer_offset == 0) {
-        /* Poll VERY aggressively to drain NIC RX queue */
-        for (int i = 0; i < 100; i++) {
+        /* Poll moderately to avoid mbuf exhaustion */
+        for (int i = 0; i < 5; i++) {
             dpdk_process_packets();
         }
 
@@ -1703,8 +1703,8 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
         /* Process DPDK packets if we have DPDK sockets */
         if (has_dpdk_sockets) {
-            /* Call dpdk_process_packets MANY times for maximum throughput */
-            for (int i = 0; i < 100; i++) {
+            /* Process packets moderately to avoid mbuf exhaustion */
+            for (int i = 0; i < 5; i++) {
                 dpdk_process_packets();
             }
 
