@@ -75,6 +75,7 @@ struct dpdk_connection {
     uint8_t wscale_local;            /* Local window scale factor (RFC 1323) */
     uint8_t wscale_remote;           /* Remote window scale factor (RFC 1323) */
     uint32_t rwnd_available;         /* Available receive window (bytes) */
+    uint32_t last_advertised_rwnd;   /* Last advertised window in ACKs */
 
     /* Transmit and receive buffers */
     struct rte_ring *rx_ring;        /* Received packets */

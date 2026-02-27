@@ -476,6 +476,7 @@ static struct dpdk_connection *dpdk_alloc_connection(int fd)
     conn->wscale_local = 7;  /* Support up to 2^7 * 64KB = 8MB window */
     conn->wscale_remote = 0; /* Will negotiate during SYN */
     conn->rwnd_available = DPDK_RX_BUFFER_SIZE;  /* Full buffer available initially */
+    conn->last_advertised_rwnd = DPDK_RX_BUFFER_SIZE;  /* Track advertised window */
 
     /* Window size sent to peer (advertised window / 2^wscale) */
     uint32_t max_window = DPDK_RX_BUFFER_SIZE >> conn->wscale_local;
@@ -1080,15 +1081,17 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         conn->rx_buffer_offset -= copied;
 
         /* Restore window space as data is consumed (flow control) */
-        uint32_t old_rwnd = conn->rwnd_available;
         if (conn->rwnd_available + copied <= (uint32_t)DPDK_RX_BUFFER_SIZE) {
             conn->rwnd_available += copied;
         } else {
             conn->rwnd_available = DPDK_RX_BUFFER_SIZE;
         }
 
-        /* Send window update ACK if we've restored significant window space (RFC 793 silly window avoidance) */
-        if (old_rwnd < (DPDK_RX_BUFFER_SIZE / 4) && conn->rwnd_available >= (DPDK_RX_BUFFER_SIZE / 4)) {
+        /* Send window update ACK if window has grown significantly since last advertisement
+         * This prevents zero-window deadlock when application drains data slowly.
+         * Threshold: 1MB (1/8 of 8MB buffer) - balances update frequency vs ACK overhead */
+        #define WINDOW_UPDATE_THRESHOLD (DPDK_RX_BUFFER_SIZE / 8)
+        if (conn->rwnd_available >= conn->last_advertised_rwnd + WINDOW_UPDATE_THRESHOLD) {
             dpdk_send_tcp_ack(conn);
         }
 
@@ -1166,15 +1169,14 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         conn->rx_buffer_offset -= copied;
 
         /* Restore window space as data is consumed (flow control) */
-        uint32_t old_rwnd = conn->rwnd_available;
         if (conn->rwnd_available + copied <= (uint32_t)DPDK_RX_BUFFER_SIZE) {
             conn->rwnd_available += copied;
         } else {
             conn->rwnd_available = DPDK_RX_BUFFER_SIZE;
         }
 
-        /* Send window update ACK if we've restored significant window space (RFC 793 silly window avoidance) */
-        if (old_rwnd < (DPDK_RX_BUFFER_SIZE / 4) && conn->rwnd_available >= (DPDK_RX_BUFFER_SIZE / 4)) {
+        /* Send window update ACK if window has grown significantly since last advertisement */
+        if (conn->rwnd_available >= conn->last_advertised_rwnd + WINDOW_UPDATE_THRESHOLD) {
             dpdk_send_tcp_ack(conn);
         }
 
@@ -1902,6 +1904,9 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
         scaled_window = 65535;  /* Max for 16-bit field */
     }
     tcp_hdr->rx_win = rte_cpu_to_be_16((uint16_t)scaled_window);
+
+    /* Track what window we advertised for future delta calculations */
+    conn->last_advertised_rwnd = conn->rwnd_available;
 
     tcp_hdr->cksum = 0;
     tcp_hdr->tcp_urp = 0;
