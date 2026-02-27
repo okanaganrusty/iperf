@@ -1141,6 +1141,35 @@ int dpdk_rx_burst(uint16_t port_id)
         }
 
         /* Route packet to appropriate connection */
+        /* Debug: Show all connections when routing TCP packets */
+        if (g_dpdk_state->debug && protocol == DPDK_PROTO_TCP) {
+            struct rte_tcp_hdr *tcp = (struct rte_tcp_hdr *)(ip_hdr + 1);
+            printf("DPDK RX: Routing seq=%u from %u.%u.%u.%u:%u to %u.%u.%u.%u:%u\n",
+                   rte_be_to_cpu_32(tcp->sent_seq),
+                   (ip_hdr->src_addr >> 0) & 0xFF, (ip_hdr->src_addr >> 8) & 0xFF,
+                   (ip_hdr->src_addr >> 16) & 0xFF, (ip_hdr->src_addr >> 24) & 0xFF,
+                   src_port,
+                   (ip_hdr->dst_addr >> 0) & 0xFF, (ip_hdr->dst_addr >> 8) & 0xFF,
+                   (ip_hdr->dst_addr >> 16) & 0xFF, (ip_hdr->dst_addr >> 24) & 0xFF,
+                   dst_port);
+            printf("DPDK RX: Connection table:\n");
+            for (int i = 0; i < DPDK_MAX_CONNECTIONS; i++) {
+                struct dpdk_connection *c = g_dpdk_state->connections[i];
+                if (c) {
+                    struct sockaddr_in *r = (struct sockaddr_in *)&c->remote_addr;
+                    struct sockaddr_in *l = (struct sockaddr_in *)&c->local_addr;
+                    printf("  [%d] fd=%d connected=%d listening=%d local=%u.%u.%u.%u:%u remote=%u.%u.%u.%u:%u\n",
+                           i, c->fd, c->connected, c->listening,
+                           (l->sin_addr.s_addr >> 0) & 0xFF, (l->sin_addr.s_addr >> 8) & 0xFF,
+                           (l->sin_addr.s_addr >> 16) & 0xFF, (l->sin_addr.s_addr >> 24) & 0xFF,
+                           ntohs(l->sin_port),
+                           (r->sin_addr.s_addr >> 0) & 0xFF, (r->sin_addr.s_addr >> 8) & 0xFF,
+                           (r->sin_addr.s_addr >> 16) & 0xFF, (r->sin_addr.s_addr >> 24) & 0xFF,
+                           ntohs(r->sin_port));
+                }
+            }
+        }
+
         /* Check established connections first (more specific match) */
         for (idx = 0; idx < DPDK_MAX_CONNECTIONS; idx++) {
             struct dpdk_connection *conn = g_dpdk_state->connections[idx];
