@@ -958,7 +958,16 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
 
     /* Fill Ethernet header - simplified */
     memcpy(&eth_hdr->src_addr, &g_dpdk_state->mac_addr, RTE_ETHER_ADDR_LEN);
+    /* For now, use broadcast MAC - proper implementation would need ARP resolution */
+    memset(&eth_hdr->dst_addr, 0xff, RTE_ETHER_ADDR_LEN);
     eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+
+    /* Extract remote IP and port from sockaddr */
+    struct sockaddr_in *remote_sin = (struct sockaddr_in *)&conn->remote_addr;
+    struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
+    uint32_t dst_ip = remote_sin->sin_addr.s_addr;
+    uint16_t src_port = local_sin->sin_port;
+    uint16_t dst_port = remote_sin->sin_port;
 
     /* Fill IP header - simplified */
     ip_hdr->version_ihl = 0x45; /* IPv4, 20 byte header */
@@ -968,10 +977,16 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     ip_hdr->fragment_offset = 0;
     ip_hdr->time_to_live = 64;
     ip_hdr->next_proto_id = DPDK_PROTO_TCP;
+    ip_hdr->hdr_checksum = 0;
     ip_hdr->src_addr = g_dpdk_state->ipv4_addr;
-    /* dst_addr would be filled from conn->remote_addr */
+    ip_hdr->dst_addr = dst_ip;
+    ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
 
     /* Fill TCP header - simplified */
+    tcp_hdr->src_port = src_port;
+    tcp_hdr->dst_port = dst_port;
+    tcp_hdr->sent_seq = rte_cpu_to_be_32(conn->seq_num);
+    tcp_hdr->recv_ack = rte_cpu_to_be_32(conn->ack_num);
     tcp_hdr->data_off = 0x50; /* 20 byte header */
     tcp_hdr->tcp_flags = flags;
     tcp_hdr->rx_win = rte_cpu_to_be_16(conn->window_size);
@@ -1007,15 +1022,33 @@ int dpdk_create_udp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     mbuf->data_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*udp_hdr) + len;
     mbuf->pkt_len = mbuf->data_len;
 
+    /* Extract remote IP and port from sockaddr */
+    struct sockaddr_in *remote_sin = (struct sockaddr_in *)&conn->remote_addr;
+    struct sockaddr_in *local_sin = (struct sockaddr_in *)&conn->local_addr;
+    uint32_t dst_ip = remote_sin->sin_addr.s_addr;
+    uint16_t src_port = local_sin->sin_port;
+    uint16_t dst_port = remote_sin->sin_port;
+
     /* Fill headers - simplified */
     memcpy(&eth_hdr->src_addr, &g_dpdk_state->mac_addr, RTE_ETHER_ADDR_LEN);
+    /* For now, use broadcast MAC - proper implementation would need ARP resolution */
+    memset(&eth_hdr->dst_addr, 0xff, RTE_ETHER_ADDR_LEN);
     eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
     ip_hdr->version_ihl = 0x45;
+    ip_hdr->type_of_service = 0;
     ip_hdr->total_length = rte_cpu_to_be_16(sizeof(*ip_hdr) + sizeof(*udp_hdr) + len);
+    ip_hdr->packet_id = 0;
+    ip_hdr->fragment_offset = 0;
+    ip_hdr->time_to_live = 64;
     ip_hdr->next_proto_id = DPDK_PROTO_UDP;
+    ip_hdr->hdr_checksum = 0;
     ip_hdr->src_addr = g_dpdk_state->ipv4_addr;
+    ip_hdr->dst_addr = dst_ip;
+    ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
 
+    udp_hdr->src_port = src_port;
+    udp_hdr->dst_port = dst_port;
     udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(*udp_hdr) + len);
     udp_hdr->dgram_cksum = 0;
 
