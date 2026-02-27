@@ -724,8 +724,8 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
     /* Trigger TX burst */
     dpdk_tx_burst(conn->port_id);
 
-    /* Small delay to allow packet transmission */
-    usleep(100); /* 100 microseconds */
+    /* Delay to allow packet transmission and remote RX processing */
+    usleep(5000); /* 5ms delay */
 
     return len;
 }
@@ -835,7 +835,10 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
     /* Wait up to 10 seconds for data (100000 * 100us = 10s) */
     int attempts = 0;
     while (attempts < 100000 && conn->rx_buffer_offset == 0) {
-        dpdk_process_packets();
+        /* Poll multiple times per iteration for better responsiveness */
+        for (int i = 0; i < 5; i++) {
+            dpdk_process_packets();
+        }
 
         /* Try to dequeue and process packets */
         while (conn->rx_buffer_offset < DPDK_RX_BUFFER_SIZE &&
