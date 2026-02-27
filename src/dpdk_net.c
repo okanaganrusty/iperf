@@ -671,6 +671,11 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
     struct dpdk_connection *conn;
     struct rte_mbuf *mbuf;
     int ret;
+    size_t total_sent = 0;
+    size_t chunk_size;
+    const char *data_ptr = (const char *)buf;
+    /* Maximum segment size - MTU (1500) - IP header (20) - TCP header (20) = 1460 */
+    const size_t MAX_SEGMENT_SIZE = 1460;
 
     conn = dpdk_get_connection(sockfd);
     if (!conn) {
@@ -689,45 +694,71 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
         return -1;
     }
 
-    if (g_dpdk_state && g_dpdk_state->debug) {
-        printf("DPDK send: sockfd=%d len=%zu connected=%d state=%d\n",
-               sockfd, len, conn->connected, conn->state);
+    if (g_dpdk_state && g_dpdk_state->debug && len > MAX_SEGMENT_SIZE) {
+        printf("DPDK send: sockfd=%d len=%zu (will segment into %zu packets)\n",
+               sockfd, len, (len + MAX_SEGMENT_SIZE - 1) / MAX_SEGMENT_SIZE);
     }
 
-    /* Allocate mbuf */
-    mbuf = rte_pktmbuf_alloc(g_dpdk_state->mbuf_pool);
-    if (!mbuf) {
-        errno = ENOMEM;
-        return -1;
+    /* Segment large data into multiple packets */
+    while (total_sent < len) {
+        chunk_size = (len - total_sent > MAX_SEGMENT_SIZE) ? MAX_SEGMENT_SIZE : (len - total_sent);
+
+        /* Allocate mbuf */
+        mbuf = rte_pktmbuf_alloc(g_dpdk_state->mbuf_pool);
+        if (!mbuf) {
+            if (total_sent == 0) {
+                errno = ENOMEM;
+                return -1;
+            }
+            /* Partial send is OK */
+            break;
+        }
+
+        /* Create packet with this chunk */
+        if (conn->protocol == DPDK_PROTO_TCP) {
+            ret = dpdk_create_tcp_packet(conn, mbuf, data_ptr + total_sent, chunk_size,
+                                        DPDK_TCP_FLAG_PSH | DPDK_TCP_FLAG_ACK);
+        } else {
+            ret = dpdk_create_udp_packet(conn, mbuf, data_ptr + total_sent, chunk_size);
+        }
+
+        if (ret < 0) {
+            rte_pktmbuf_free(mbuf);
+            if (total_sent == 0) {
+                errno = EINVAL;
+                return -1;
+            }
+            /* Partial send is OK */
+            break;
+        }
+
+        /* Queue packet for transmission */
+        if (rte_ring_enqueue(conn->tx_ring, mbuf) < 0) {
+            rte_pktmbuf_free(mbuf);
+            /* TX ring full, trigger burst and break */
+            dpdk_tx_burst(conn->port_id);
+            if (total_sent == 0) {
+                errno = EAGAIN;
+                return -1;
+            }
+            /* Partial send is OK */
+            break;
+        }
+
+        total_sent += chunk_size;
+
+        /* Trigger TX burst every 16 packets or when done */
+        if (rte_ring_count(conn->tx_ring) >= 16 || total_sent >= len) {
+            dpdk_tx_burst(conn->port_id);
+        }
     }
 
-    /* Create packet */
-    if (conn->protocol == DPDK_PROTO_TCP) {
-        ret = dpdk_create_tcp_packet(conn, mbuf, buf, len, DPDK_TCP_FLAG_PSH | DPDK_TCP_FLAG_ACK);
-    } else {
-        ret = dpdk_create_udp_packet(conn, mbuf, buf, len);
+    if (g_dpdk_state && g_dpdk_state->debug && len > MAX_SEGMENT_SIZE) {
+        printf("DPDK send: sockfd=%d sent %zu/%zu bytes in segments\n",
+               sockfd, total_sent, len);
     }
 
-    if (ret < 0) {
-        rte_pktmbuf_free(mbuf);
-        errno = EINVAL;
-        return -1;
-    }
-
-    /* Queue packet for transmission */
-    if (rte_ring_enqueue(conn->tx_ring, mbuf) < 0) {
-        rte_pktmbuf_free(mbuf);
-        errno = EAGAIN;
-        return -1;
-    }
-
-    /* Trigger TX burst */
-    dpdk_tx_burst(conn->port_id);
-
-    /* Delay to allow packet transmission and RX processing */
-    usleep(2000); /* 2ms delay */
-
-    return len;
+    return total_sent;
 }
 
 /* Receive data */
