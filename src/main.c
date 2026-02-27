@@ -34,7 +34,14 @@
 #include <signal.h>
 #include <unistd.h>
 #include <stdint.h>
+
+#ifdef HAVE_DPDK
+#include "dpdk_net.h"
+#include "socket_wrapper.h"
+#else
 #include <sys/socket.h>
+#endif
+
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -121,8 +128,26 @@ main(int argc, char **argv)
         exit(1);
     }
 
+#ifdef HAVE_DPDK
+    /* Initialize DPDK if enabled */
+    if (test->dpdk_enabled) {
+        if (dpdk_net_init(test->dpdk_argc, test->dpdk_argv,
+                          test->dpdk_port_id, test->dpdk_ip_addr) < 0) {
+            iperf_errexit(test, "DPDK initialization failed");
+        }
+        fprintf(stderr, "DPDK initialized successfully on port %u\n", test->dpdk_port_id);
+    }
+#endif
+
     if (run(test) < 0)
         iperf_errexit(test, "error - %s", iperf_strerror(i_errno));
+
+#ifdef HAVE_DPDK
+    /* Cleanup DPDK if enabled */
+    if (test->dpdk_enabled) {
+        dpdk_net_cleanup();
+    }
+#endif
 
     iperf_free_test(test);
 

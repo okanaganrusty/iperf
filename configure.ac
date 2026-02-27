@@ -121,6 +121,42 @@ AC_CHECK_HEADERS([stdatomic.h],
 # Check for poll.h (it's in POSIX so everyone should have it?)
 AC_CHECK_HEADERS([poll.h])
 
+# DPDK support. Allow user to enable DPDK with --with-dpdk.
+try_dpdk=false
+AC_ARG_WITH([dpdk],
+    [AS_HELP_STRING([--with-dpdk],
+        [enable DPDK support])],
+    [
+        case "$withval" in
+	y | ye | yes)
+	  try_dpdk=true
+	  ;;
+	n | no)
+	  try_dpdk=false
+	  ;;
+	*)
+	  AC_MSG_ERROR([Invalid --with-dpdk value])
+	  ;;
+	esac
+    ], [
+        try_dpdk=false
+    ]
+)
+
+# Check for DPDK support
+if $try_dpdk; then
+    AC_MSG_CHECKING([for DPDK])
+    PKG_CHECK_MODULES([DPDK], [libdpdk], [
+        AC_DEFINE([HAVE_DPDK], [1], [Have DPDK support.])
+        CFLAGS="$CFLAGS $DPDK_CFLAGS"
+        LIBS="$LIBS $DPDK_LIBS"
+        AC_MSG_RESULT([yes])
+    ], [
+        AC_MSG_RESULT([no])
+        AC_MSG_ERROR([DPDK requested but not found. Please install DPDK development packages.])
+    ])
+fi
+
 # SCTP.  Allow user to disable SCTP support with --without-sctp.
 # Otherwise we try to find whatever support is required.
 try_sctp=true
@@ -250,7 +286,7 @@ fi
 # Define HAVE_CPU_AFFINITY to indicate the CPU affinity setting as a
 # generic concept is available.
 AC_CHECK_FUNCS([cpuset_setaffinity sched_setaffinity SetProcessAffinityMask],
-	       AC_DEFINE([HAVE_CPU_AFFINITY], [1], 
+	       AC_DEFINE([HAVE_CPU_AFFINITY], [1],
 	 	         [Have CPU affinity support.]))
 
 # Check for daemon().  Most systems have this but a few (IRIX) don't.

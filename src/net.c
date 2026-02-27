@@ -30,7 +30,14 @@
 #include <unistd.h>
 #include <errno.h>
 #include <arpa/inet.h>
+
+#ifdef HAVE_DPDK
+#include "dpdk_net.h"
+#include "socket_wrapper.h"
+#else
 #include <sys/socket.h>
+#endif
+
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <assert.h>

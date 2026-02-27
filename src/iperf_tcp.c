@@ -30,7 +30,14 @@
 #include <errno.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+
+#ifdef HAVE_DPDK
+#include "dpdk_net.h"
+#include "socket_wrapper.h"
+#else
 #include <sys/socket.h>
+#endif
+
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <netdb.h>
@@ -510,7 +517,7 @@ iperf_tcp_connect(struct iperf_test *test)
     if (sndbuf_actual_item == NULL) {
 	cJSON_AddNumberToObject(test->json_start, "sndbuf_actual", sndbuf_actual);
     }
-        
+
     cJSON *rcvbuf_actual_item = cJSON_GetObjectItem(test->json_start, "rcvbuf_actual");
     if (rcvbuf_actual_item == NULL) {
 	cJSON_AddNumberToObject(test->json_start, "rcvbuf_actual", rcvbuf_actual);

@@ -34,7 +34,14 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <sys/select.h>
+
+#ifdef HAVE_DPDK
+#include "dpdk_net.h"
+#include "socket_wrapper.h"
+#else
 #include <sys/socket.h>
+#endif
+
 #ifndef _GNU_SOURCE
 # define _GNU_SOURCE
 #endif
@@ -340,6 +347,15 @@ struct iperf_test
     int       prot_listener;
 
     int	      ctrl_sck_mss;			/* MSS for the control channel */
+
+#ifdef HAVE_DPDK
+    /* DPDK specific configuration */
+    int       dpdk_enabled;                      /* Whether DPDK is enabled */
+    uint16_t  dpdk_port_id;                      /* DPDK port ID */
+    char     *dpdk_ip_addr;                      /* DPDK IP address */
+    int       dpdk_argc;                         /* DPDK EAL arguments */
+    char    **dpdk_argv;
+#endif
 
 #if defined(HAVE_SSL)
     char      *server_authorized_users;

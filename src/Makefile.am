@@ -45,6 +45,9 @@ libiperf_la_SOURCES     = \
                         timer.h \
                         units.c \
                         units.h \
+                        dpdk_net.c \
+                        dpdk_net.h \
+                        socket_wrapper.h \
                         version.h
 
 # Specify the sources and various flags for the iperf binary

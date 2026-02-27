@@ -107,6 +107,9 @@ typedef atomic_uint_fast64_t atomic_iperf_size_t;
 #define OPT_JSON_STREAM_FULL_OUTPUT 33
 #define OPT_SERVER_MAX_DURATION 34
 #define OPT_GSRO 35
+#define OPT_DPDK_ENABLE 36
+#define OPT_DPDK_PORT 37
+#define OPT_DPDK_IP 38
 
 /* states */
 #define TEST_START 1

@@ -602,25 +602,25 @@ iperf_set_mapped_v4(struct iperf_test *ipt, const int val)
     ipt->mapped_v4 = val;
 }
 
-void 
+void
 iperf_set_on_new_stream_callback(struct iperf_test* ipt, void (*callback)(struct iperf_stream *))
 {
         ipt->on_new_stream = callback;
 }
 
-void 
+void
 iperf_set_on_test_start_callback(struct iperf_test* ipt, void (*callback)(struct iperf_test *))
 {
         ipt->on_test_start = callback;
 }
 
-void 
+void
 iperf_set_on_test_connect_callback(struct iperf_test* ipt, void (*callback)(struct iperf_test *))
 {
         ipt->on_connect = callback;
 }
 
-void 
+void
 iperf_set_on_test_finish_callback(struct iperf_test* ipt, void (*callback)(struct iperf_test *))
 {
         ipt->on_test_finish = callback;
@@ -1190,6 +1190,11 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
         {"mptcp", no_argument, NULL, 'm'},
 #endif
         {"gsro", no_argument, NULL, OPT_GSRO},
+#ifdef HAVE_DPDK
+        {"dpdk", no_argument, NULL, OPT_DPDK_ENABLE},
+        {"dpdk-port", required_argument, NULL, OPT_DPDK_PORT},
+        {"dpdk-ip", required_argument, NULL, OPT_DPDK_IP},
+#endif
         {"debug", optional_argument, NULL, 'd'},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0}
@@ -1799,6 +1804,21 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 		test->settings->gso = 1;
 		test->settings->gro = 1;
                 break;
+#ifdef HAVE_DPDK
+            case OPT_DPDK_ENABLE:
+                test->dpdk_enabled = 1;
+                break;
+            case OPT_DPDK_PORT:
+                test->dpdk_port_id = (uint16_t)atoi(optarg);
+                break;
+            case OPT_DPDK_IP:
+                test->dpdk_ip_addr = strdup(optarg);
+                if (!test->dpdk_ip_addr) {
+                    i_errno = IENOMEMORY;
+                    return -1;
+                }
+                break;
+#endif
 	    case 'h':
 		usage_long(stdout);
 		exit(0);
@@ -2066,7 +2086,7 @@ iperf_check_throttle(struct iperf_stream *sp, struct iperf_time *nowP)
     uint64_t bits_per_second;
     int64_t missing_rate;
     uint64_t bits_sent;
-    
+
 #if defined(HAVE_CLOCK_NANOSLEEP) || defined(HAVE_NANOSLEEP)
     struct timespec nanosleep_time;
     int64_t time_to_green_light, delta_bits;
@@ -2253,7 +2273,7 @@ iperf_recv_mt(struct iperf_stream *sp)
 		i_errno = IESTREAMREAD;
 		return r;
 	    }
-            
+
             /* Collect statistics only if receive did not timeout (e.g. `Nread()` may timeout).
              * This is also important for `--rcv-timeout` to work properly.
              */
@@ -3889,7 +3909,7 @@ iperf_print_intermediate(struct iperf_test *test)
      * results around unless we're the server and the client requested the server output.
      *
      * This avoids unneeded memory build up for long sessions.
-     * 
+     *
      * The user can still opt in for all measurement data via the --json-stream-full-output option.
      */
     discard_json = test->json_stream == 1 && !test->json_stream_full_output && !(test->role == 's' && test->get_server_output);
@@ -4497,7 +4517,7 @@ iperf_print_results(struct iperf_test *test)
                      * ambiguities between the sender and receiver.
                      */
                     cJSON_AddItemToObject(test->json_end, sum_name, iperf_json_printf("start: %f  end: %f  seconds: %f  bytes: %d  bits_per_second: %f  jitter_ms: %f  lost_packets: %d  packets: %d  lost_percent: %f sender: %b", (double) start_time, (double) receiver_time, (double) receiver_time, (int64_t) total_sent, bandwidth * 8, (double) avg_jitter * 1000.0, (int64_t) lost_packets, (int64_t) total_packets, (double) lost_percent, stream_must_be_sender));
-                    
+
                     double sent_bandwidth = sender_time > 0 ? ((double) total_sent * 8 / sender_time) : 0.0;
                     double recv_bandwidth = receiver_time > 0 ? ((double) total_received * 8 / receiver_time) : 0.0;
                     /*
@@ -5603,7 +5623,7 @@ iperf_set_control_keepalive(struct iperf_test *test)
                 return -1;
             }
         }
-   
+
         // Seems that at least in Windows WSL2, TCP keepalive retries full interval must be
         // smaller than the idle interval. Otherwise, the keepalive message is sent only once.
         if (test->settings->cntl_ka_keepidle) {
