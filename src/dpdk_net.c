@@ -1080,10 +1080,16 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         conn->rx_buffer_offset -= copied;
 
         /* Restore window space as data is consumed (flow control) */
+        uint32_t old_rwnd = conn->rwnd_available;
         if (conn->rwnd_available + copied <= (uint32_t)DPDK_RX_BUFFER_SIZE) {
             conn->rwnd_available += copied;
         } else {
             conn->rwnd_available = DPDK_RX_BUFFER_SIZE;
+        }
+
+        /* Send window update ACK if we've restored significant window space (RFC 793 silly window avoidance) */
+        if (old_rwnd < (DPDK_RX_BUFFER_SIZE / 4) && conn->rwnd_available >= (DPDK_RX_BUFFER_SIZE / 4)) {
+            dpdk_send_tcp_ack(conn);
         }
 
         return copied;
@@ -1160,10 +1166,16 @@ ssize_t dpdk_recv(int sockfd, void *buf, size_t len, int flags)
         conn->rx_buffer_offset -= copied;
 
         /* Restore window space as data is consumed (flow control) */
+        uint32_t old_rwnd = conn->rwnd_available;
         if (conn->rwnd_available + copied <= (uint32_t)DPDK_RX_BUFFER_SIZE) {
             conn->rwnd_available += copied;
         } else {
             conn->rwnd_available = DPDK_RX_BUFFER_SIZE;
+        }
+
+        /* Send window update ACK if we've restored significant window space (RFC 793 silly window avoidance) */
+        if (old_rwnd < (DPDK_RX_BUFFER_SIZE / 4) && conn->rwnd_available >= (DPDK_RX_BUFFER_SIZE / 4)) {
+            dpdk_send_tcp_ack(conn);
         }
 
         return copied;
@@ -1812,8 +1824,8 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     int include_wscale = 0;
     int tcp_hdr_len = 20;  /* Base header length */
 
-    /* Determine if we should include window scale option (for SYN, SYN-ACK responses) */
-    include_wscale = (flags & (DPDK_TCP_FLAG_SYN | DPDK_TCP_FLAG_ACK)) != 0;
+    /* Determine if we should include window scale option (ONLY in SYN packets per RFC 1323) */
+    include_wscale = (flags & DPDK_TCP_FLAG_SYN) != 0;
     if (include_wscale) {
         tcp_hdr_len = 24;  /* 20 + 4 bytes for window scale option */
     }
@@ -1985,8 +1997,7 @@ static int dpdk_send_tcp_syn(struct dpdk_connection *conn)
     return 0;
 }
 
-/* Helper: Send TCP ACK */
-__attribute__((unused))
+/* Helper: Send TCP ACK (for window updates and flow control) */
 static int dpdk_send_tcp_ack(struct dpdk_connection *conn)
 {
     struct rte_mbuf *mbuf;
