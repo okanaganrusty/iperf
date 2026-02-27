@@ -10,6 +10,7 @@
 #define __DPDK_NET_H
 
 #include <stdint.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -89,6 +90,10 @@ struct dpdk_connection {
 
     /* DPDK port */
     uint16_t port_id;
+
+    /* Learned remote MAC address */
+    struct rte_ether_addr remote_mac;
+    int remote_mac_valid;
 };
 
 /* Global DPDK state */
@@ -117,6 +122,14 @@ struct dpdk_state {
     /* Debug flags */
     int debug;                       /* Enable debug output */
     int packet_dump;                 /* Enable packet dumping */
+
+    /* Fast-path threading */
+    int fast_path_enabled;
+    volatile int fast_path_running;
+    int fast_path_rx_started;
+    int fast_path_tx_started;
+    pthread_t rx_thread;
+    pthread_t tx_thread;
 };
 
 /* DPDK initialization and cleanup */

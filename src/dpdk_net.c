@@ -17,10 +17,13 @@
 #include <sys/time.h>
 #include <arpa/inet.h>
 
+#include <pthread.h>
+
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 #include <rte_ether.h>
+#include <rte_pause.h>
 
 #include "dpdk_net.h"
 
@@ -33,6 +36,10 @@ static void dpdk_handle_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf
 static void dpdk_handle_udp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf);
 static int dpdk_send_tcp_syn(struct dpdk_connection *conn);
 static int dpdk_send_tcp_ack(struct dpdk_connection *conn);
+static void *dpdk_rx_thread_main(void *arg);
+static void *dpdk_tx_thread_main(void *arg);
+static int dpdk_start_fast_path(void);
+static void dpdk_stop_fast_path(void);
 
 /* Initialize DPDK */
 int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, const char *netmask, int debug)
@@ -60,6 +67,10 @@ int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, 
     g_dpdk_state->next_fd = 100; /* Start from 100 to avoid conflicts */
     g_dpdk_state->debug = debug;
     g_dpdk_state->packet_dump = (debug > 0); /* Enable packet dump if debug enabled */
+    g_dpdk_state->fast_path_enabled = 1;
+    g_dpdk_state->fast_path_running = 0;
+    g_dpdk_state->fast_path_rx_started = 0;
+    g_dpdk_state->fast_path_tx_started = 0;
 
     /* Create packet buffer pool */
     snprintf(pool_name, sizeof(pool_name), "mbuf_pool_%u", port_id);
@@ -99,6 +110,18 @@ int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, 
         rte_mempool_free(g_dpdk_state->mbuf_pool);
         free(g_dpdk_state);
         return -1;
+    }
+
+    /* Start fast-path RX/TX threads */
+    if (g_dpdk_state->fast_path_enabled) {
+        if (dpdk_start_fast_path() < 0) {
+            fprintf(stderr, "Failed to start DPDK fast-path threads\n");
+            rte_hash_free(g_dpdk_state->conn_hash);
+            rte_mempool_free(g_dpdk_state->mbuf_pool);
+            free(g_dpdk_state);
+            g_dpdk_state = NULL;
+            return -1;
+        }
     }
 
     /* Parse and set IP address */
@@ -231,6 +254,9 @@ int dpdk_net_cleanup(void)
             dpdk_free_connection(g_dpdk_state->connections[i]->fd);
         }
     }
+
+    /* Stop fast-path threads before tearing down the port */
+    dpdk_stop_fast_path();
 
     /* Stop and close the port */
     rte_eth_dev_stop(g_dpdk_state->port_id);
@@ -510,6 +536,8 @@ int dpdk_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
         new_conn->connected = 1;
         new_conn->parent_fd = sockfd;
         new_conn->port_id = conn->port_id;
+        new_conn->remote_mac = eth_hdr->src_addr;
+        new_conn->remote_mac_valid = 1;
 
         /* Copy local address from listener */
         memcpy(&new_conn->local_addr, &conn->local_addr, conn->local_addr_len);
@@ -747,9 +775,11 @@ ssize_t dpdk_send(int sockfd, const void *buf, size_t len, int flags)
 
         total_sent += chunk_size;
 
-        /* Trigger TX burst more frequently for lower latency */
-        if (rte_ring_count(conn->tx_ring) >= 32 || total_sent >= len) {
-            dpdk_tx_burst(conn->port_id);
+        /* Trigger TX burst more frequently for lower latency when not in fast-path mode */
+        if (!g_dpdk_state->fast_path_enabled) {
+            if (rte_ring_count(conn->tx_ring) >= 32 || total_sent >= len) {
+                dpdk_tx_burst(conn->port_id);
+            }
         }
     }
 
@@ -1206,6 +1236,11 @@ int dpdk_rx_burst(uint16_t port_id)
                     payload_len = rte_pktmbuf_pkt_len(bufs[i]) - total_hdr_len;
                 }
 
+                if (!conn->remote_mac_valid) {
+                    conn->remote_mac = eth_hdr->src_addr;
+                    conn->remote_mac_valid = 1;
+                }
+
                 if (payload_len > 0 &&
                     conn->rx_buffer_offset + payload_len <= conn->rx_buffer_size) {
                     rte_memcpy(conn->rx_buffer + conn->rx_buffer_offset, payload, payload_len);
@@ -1325,6 +1360,11 @@ int dpdk_process_packets(void)
         return -1;
     }
 
+    /* In fast-path mode, RX/TX threads handle packet processing */
+    if (g_dpdk_state->fast_path_enabled) {
+        return 0;
+    }
+
     /* Receive packets */
     dpdk_rx_burst(g_dpdk_state->port_id);
 
@@ -1386,10 +1426,14 @@ int dpdk_create_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     mbuf->data_len = sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*tcp_hdr) + len;
     mbuf->pkt_len = mbuf->data_len;
 
-    /* Fill Ethernet header - simplified */
-    memcpy(&eth_hdr->src_addr, &g_dpdk_state->mac_addr, RTE_ETHER_ADDR_LEN);
-    /* For now, use broadcast MAC - proper implementation would need ARP resolution */
-    memset(&eth_hdr->dst_addr, 0xff, RTE_ETHER_ADDR_LEN);
+    /* Fill Ethernet header */
+    rte_ether_addr_copy(&g_dpdk_state->mac_addr, &eth_hdr->src_addr);
+    if (conn->remote_mac_valid) {
+        rte_ether_addr_copy(&conn->remote_mac, &eth_hdr->dst_addr);
+    } else {
+        /* Fall back to broadcast if MAC is unknown */
+        memset(&eth_hdr->dst_addr, 0xff, RTE_ETHER_ADDR_LEN);
+    }
     eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
     /* Extract remote IP and port from sockaddr */
@@ -1459,10 +1503,14 @@ int dpdk_create_udp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf,
     uint16_t src_port = local_sin->sin_port;
     uint16_t dst_port = remote_sin->sin_port;
 
-    /* Fill headers - simplified */
-    memcpy(&eth_hdr->src_addr, &g_dpdk_state->mac_addr, RTE_ETHER_ADDR_LEN);
-    /* For now, use broadcast MAC - proper implementation would need ARP resolution */
-    memset(&eth_hdr->dst_addr, 0xff, RTE_ETHER_ADDR_LEN);
+    /* Fill headers */
+    rte_ether_addr_copy(&g_dpdk_state->mac_addr, &eth_hdr->src_addr);
+    if (conn->remote_mac_valid) {
+        rte_ether_addr_copy(&conn->remote_mac, &eth_hdr->dst_addr);
+    } else {
+        /* Fall back to broadcast if MAC is unknown */
+        memset(&eth_hdr->dst_addr, 0xff, RTE_ETHER_ADDR_LEN);
+    }
     eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
     ip_hdr->version_ihl = 0x45;
@@ -1497,7 +1545,9 @@ static int dpdk_send_tcp_syn(struct dpdk_connection *conn)
 
     dpdk_create_tcp_packet(conn, mbuf, NULL, 0, DPDK_TCP_FLAG_SYN);
     rte_ring_enqueue(conn->tx_ring, mbuf);
-    dpdk_tx_burst(conn->port_id);
+    if (!g_dpdk_state->fast_path_enabled) {
+        dpdk_tx_burst(conn->port_id);
+    }
 
     return 0;
 }
@@ -1515,7 +1565,9 @@ static int dpdk_send_tcp_ack(struct dpdk_connection *conn)
 
     dpdk_create_tcp_packet(conn, mbuf, NULL, 0, DPDK_TCP_FLAG_ACK);
     rte_ring_enqueue(conn->tx_ring, mbuf);
-    dpdk_tx_burst(conn->port_id);
+    if (!g_dpdk_state->fast_path_enabled) {
+        dpdk_tx_burst(conn->port_id);
+    }
 
     return 0;
 }
@@ -1720,6 +1772,63 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
         }
     }
 
+    /* Fast-path: no waiting for DPDK sockets, just report readiness */
+    if (g_dpdk_state->fast_path_enabled) {
+        if (has_dpdk_sockets) {
+            for (fd = 100; fd < nfds; fd++) {
+                struct dpdk_connection *conn = dpdk_get_connection(fd);
+                if (!conn) continue;
+
+                if (FD_ISSET(fd, &dpdk_readfds)) {
+                    unsigned int count = 0;
+                    if (conn->rx_ring) {
+                        count = rte_ring_count(conn->rx_ring);
+                    }
+                    if (count > 0 || conn->rx_buffer_offset > 0) {
+                        dpdk_ready++;
+                        if (readfds) FD_SET(fd, readfds);
+                    } else {
+                        if (readfds) FD_CLR(fd, readfds);
+                    }
+                }
+
+                if (FD_ISSET(fd, &dpdk_writefds)) {
+                    if (conn->connected) {
+                        dpdk_ready++;
+                        if (writefds) FD_SET(fd, writefds);
+                    } else {
+                        if (writefds) FD_CLR(fd, writefds);
+                    }
+                }
+            }
+        }
+
+        if (has_regular_sockets) {
+            regular_ready = select(regular_nfds,
+                                  has_regular_sockets ? &regular_readfds : NULL,
+                                  has_regular_sockets ? &regular_writefds : NULL,
+                                  exceptfds,
+                                  timeout);
+
+            if (regular_ready < 0) {
+                return regular_ready;
+            }
+
+            if (regular_ready > 0) {
+                for (fd = 0; fd < regular_nfds; fd++) {
+                    if (readfds && FD_ISSET(fd, &regular_readfds)) {
+                        FD_SET(fd, readfds);
+                    }
+                    if (writefds && FD_ISSET(fd, &regular_writefds)) {
+                        FD_SET(fd, writefds);
+                    }
+                }
+            }
+        }
+
+        return dpdk_ready + regular_ready;
+    }
+
     /* Poll for DPDK sockets until timeout or data arrives */
     while (1) {
         dpdk_ready = 0;
@@ -1817,4 +1926,78 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
     }
 
     return dpdk_ready + regular_ready;
+}
+
+static void *dpdk_rx_thread_main(void *arg)
+{
+    struct dpdk_state *state = (struct dpdk_state *)arg;
+
+    while (state->fast_path_running) {
+        uint16_t nb_rx = dpdk_rx_burst(state->port_id);
+        if (nb_rx == 0) {
+            rte_pause();
+        }
+    }
+
+    return NULL;
+}
+
+static void *dpdk_tx_thread_main(void *arg)
+{
+    struct dpdk_state *state = (struct dpdk_state *)arg;
+
+    while (state->fast_path_running) {
+        int sent = dpdk_tx_burst(state->port_id);
+        if (sent == 0) {
+            rte_pause();
+        }
+    }
+
+    return NULL;
+}
+
+static int dpdk_start_fast_path(void)
+{
+    if (!g_dpdk_state || !g_dpdk_state->fast_path_enabled) {
+        return 0;
+    }
+
+    g_dpdk_state->fast_path_running = 1;
+
+    if (pthread_create(&g_dpdk_state->rx_thread, NULL, dpdk_rx_thread_main, g_dpdk_state) != 0) {
+        g_dpdk_state->fast_path_running = 0;
+        return -1;
+    }
+    g_dpdk_state->fast_path_rx_started = 1;
+
+    if (pthread_create(&g_dpdk_state->tx_thread, NULL, dpdk_tx_thread_main, g_dpdk_state) != 0) {
+        g_dpdk_state->fast_path_running = 0;
+        if (g_dpdk_state->fast_path_rx_started) {
+            pthread_join(g_dpdk_state->rx_thread, NULL);
+            g_dpdk_state->fast_path_rx_started = 0;
+        }
+        return -1;
+    }
+    g_dpdk_state->fast_path_tx_started = 1;
+
+    return 0;
+}
+
+static void dpdk_stop_fast_path(void)
+{
+    if (!g_dpdk_state || !g_dpdk_state->fast_path_enabled) {
+        return;
+    }
+
+    g_dpdk_state->fast_path_running = 0;
+
+    if (g_dpdk_state->fast_path_rx_started) {
+        pthread_join(g_dpdk_state->rx_thread, NULL);
+        g_dpdk_state->fast_path_rx_started = 0;
+    }
+
+    if (g_dpdk_state->fast_path_tx_started) {
+        pthread_join(g_dpdk_state->tx_thread, NULL);
+        g_dpdk_state->fast_path_tx_started = 0;
+    }
 }
