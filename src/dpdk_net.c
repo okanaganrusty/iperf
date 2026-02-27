@@ -30,6 +30,52 @@
 /* Global DPDK state */
 struct dpdk_state *g_dpdk_state = NULL;
 
+static int dpdk_get_known_remote_mac(uint32_t remote_ip, struct rte_ether_addr *mac)
+{
+    int idx;
+
+    if (!g_dpdk_state || !mac) {
+        return 0;
+    }
+
+    for (idx = 0; idx < DPDK_MAX_CONNECTIONS; idx++) {
+        struct dpdk_connection *c = g_dpdk_state->connections[idx];
+        if (!c || !c->remote_mac_valid || c->remote_addr_len == 0) {
+            continue;
+        }
+
+        struct sockaddr_in *remote_sin = (struct sockaddr_in *)&c->remote_addr;
+        if (remote_sin->sin_family == AF_INET && remote_sin->sin_addr.s_addr == remote_ip) {
+            *mac = c->remote_mac;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void dpdk_propagate_remote_mac(uint32_t remote_ip, const struct rte_ether_addr *mac)
+{
+    int idx;
+
+    if (!g_dpdk_state || !mac) {
+        return;
+    }
+
+    for (idx = 0; idx < DPDK_MAX_CONNECTIONS; idx++) {
+        struct dpdk_connection *c = g_dpdk_state->connections[idx];
+        if (!c || c->remote_addr_len == 0) {
+            continue;
+        }
+
+        struct sockaddr_in *remote_sin = (struct sockaddr_in *)&c->remote_addr;
+        if (remote_sin->sin_family == AF_INET && remote_sin->sin_addr.s_addr == remote_ip) {
+            c->remote_mac = *mac;
+            c->remote_mac_valid = 1;
+        }
+    }
+}
+
 /* Static helper functions */
 static struct dpdk_connection *dpdk_alloc_connection(int fd);
 static void dpdk_handle_tcp_packet(struct dpdk_connection *conn, struct rte_mbuf *mbuf);
@@ -306,7 +352,7 @@ static struct dpdk_connection *dpdk_alloc_connection(int fd)
 
     /* Create RX ring */
     snprintf(ring_name, sizeof(ring_name), "rx_ring_%d", fd);
-    conn->rx_ring = rte_ring_create(ring_name, DPDK_RX_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    conn->rx_ring = rte_ring_create(ring_name, DPDK_RX_RING_SIZE, rte_socket_id(), 0);
     if (!conn->rx_ring) {
         free(conn);
         return NULL;
@@ -314,7 +360,7 @@ static struct dpdk_connection *dpdk_alloc_connection(int fd)
 
     /* Create TX ring */
     snprintf(ring_name, sizeof(ring_name), "tx_ring_%d", fd);
-    conn->tx_ring = rte_ring_create(ring_name, DPDK_TX_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    conn->tx_ring = rte_ring_create(ring_name, DPDK_TX_RING_SIZE, rte_socket_id(), 0);
     if (!conn->tx_ring) {
         rte_ring_free(conn->rx_ring);
         free(conn);
@@ -637,6 +683,7 @@ int dpdk_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
     struct dpdk_connection *conn;
     struct sockaddr_in *local_sin;
+    struct sockaddr_in *remote_sin;
     static uint16_t next_ephemeral_port = 32768;
 
     conn = dpdk_get_connection(sockfd);
@@ -647,6 +694,15 @@ int dpdk_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 
     memcpy(&conn->remote_addr, addr, addrlen);
     conn->remote_addr_len = addrlen;
+
+    remote_sin = (struct sockaddr_in *)&conn->remote_addr;
+    if (remote_sin->sin_family == AF_INET) {
+        struct rte_ether_addr known_mac;
+        if (dpdk_get_known_remote_mac(remote_sin->sin_addr.s_addr, &known_mac)) {
+            conn->remote_mac = known_mac;
+            conn->remote_mac_valid = 1;
+        }
+    }
 
     /* Auto-assign local address if not already bound */
     if (conn->local_addr_len == 0 && addr->sa_family == AF_INET) {
@@ -1168,6 +1224,9 @@ int dpdk_rx_burst(uint16_t port_id)
             rte_pktmbuf_free(bufs[i]);
             continue;
         }
+
+        /* Learn peer MAC by IP and propagate it to all matching connections */
+        dpdk_propagate_remote_mac(ip_hdr->src_addr, &eth_hdr->src_addr);
 
         /* Route packet to appropriate connection */
         /* Debug: Show all connections when routing TCP packets */
