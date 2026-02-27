@@ -1772,9 +1772,66 @@ int dpdk_wrapped_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
         }
     }
 
-    /* Fast-path: no waiting for DPDK sockets, just report readiness */
+    /* Fast-path: avoid OS select for DPDK sockets; optionally spin until timeout */
     if (g_dpdk_state->fast_path_enabled) {
         if (has_dpdk_sockets) {
+            struct timeval start_time, current_time;
+            uint64_t timeout_us = 0;
+            uint64_t elapsed_us = 0;
+
+            if (!has_regular_sockets) {
+                if (timeout) {
+                    timeout_us = (uint64_t)timeout->tv_sec * 1000000 + timeout->tv_usec;
+                    gettimeofday(&start_time, NULL);
+                }
+
+                while (1) {
+                    dpdk_ready = 0;
+                    for (fd = 100; fd < nfds; fd++) {
+                        struct dpdk_connection *conn = dpdk_get_connection(fd);
+                        if (!conn) continue;
+
+                        if (FD_ISSET(fd, &dpdk_readfds)) {
+                            unsigned int count = 0;
+                            if (conn->rx_ring) {
+                                count = rte_ring_count(conn->rx_ring);
+                            }
+                            if (count > 0 || conn->rx_buffer_offset > 0) {
+                                dpdk_ready++;
+                                if (readfds) FD_SET(fd, readfds);
+                            } else {
+                                if (readfds) FD_CLR(fd, readfds);
+                            }
+                        }
+
+                        if (FD_ISSET(fd, &dpdk_writefds)) {
+                            if (conn->connected) {
+                                dpdk_ready++;
+                                if (writefds) FD_SET(fd, writefds);
+                            } else {
+                                if (writefds) FD_CLR(fd, writefds);
+                            }
+                        }
+                    }
+
+                    if (dpdk_ready > 0) {
+                        return dpdk_ready;
+                    }
+
+                    if (timeout) {
+                        gettimeofday(&current_time, NULL);
+                        elapsed_us = (current_time.tv_sec - start_time.tv_sec) * 1000000 +
+                                     (current_time.tv_usec - start_time.tv_usec);
+                        if (elapsed_us >= timeout_us) {
+                            return 0;
+                        }
+                    }
+
+                    rte_delay_us_block(50);
+                }
+            }
+
+            /* With regular sockets present, do a single readiness check for DPDK */
             for (fd = 100; fd < nfds; fd++) {
                 struct dpdk_connection *conn = dpdk_get_connection(fd);
                 if (!conn) continue;
