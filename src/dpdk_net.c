@@ -1129,12 +1129,12 @@ int dpdk_rx_burst(uint16_t port_id)
 
         if (protocol == DPDK_PROTO_TCP) {
             tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
-            src_port = tcp_hdr->src_port;
-            dst_port = tcp_hdr->dst_port;
+            src_port = rte_be_to_cpu_16(tcp_hdr->src_port);
+            dst_port = rte_be_to_cpu_16(tcp_hdr->dst_port);
         } else if (protocol == DPDK_PROTO_UDP) {
             udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
-            src_port = udp_hdr->src_port;
-            dst_port = udp_hdr->dst_port;
+            src_port = rte_be_to_cpu_16(udp_hdr->src_port);
+            dst_port = rte_be_to_cpu_16(udp_hdr->dst_port);
         } else {
             rte_pktmbuf_free(bufs[i]);
             continue;
