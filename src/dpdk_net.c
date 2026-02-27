@@ -76,6 +76,53 @@ static void dpdk_propagate_remote_mac(uint32_t remote_ip, const struct rte_ether
     }
 }
 
+static int dpdk_is_tcp_ack_only_packet(struct rte_mbuf *mbuf)
+{
+    struct rte_ether_hdr *eth_hdr;
+    struct rte_ipv4_hdr *ip_hdr;
+    struct rte_tcp_hdr *tcp_hdr;
+    uint16_t ip_total_len;
+    uint8_t tcp_hdr_len;
+    uint16_t tcp_payload_len;
+    uint8_t flags;
+
+    if (!mbuf || rte_pktmbuf_pkt_len(mbuf) < sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr)) {
+        return 0;
+    }
+
+    eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr *);
+    if (rte_be_to_cpu_16(eth_hdr->ether_type) != RTE_ETHER_TYPE_IPV4) {
+        return 0;
+    }
+
+    ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+    if (ip_hdr->next_proto_id != DPDK_PROTO_TCP) {
+        return 0;
+    }
+
+    tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+    tcp_hdr_len = (tcp_hdr->data_off >> 4) * 4;
+    if (tcp_hdr_len < sizeof(struct rte_tcp_hdr)) {
+        return 0;
+    }
+
+    ip_total_len = rte_be_to_cpu_16(ip_hdr->total_length);
+    if (ip_total_len < sizeof(struct rte_ipv4_hdr) + tcp_hdr_len) {
+        return 0;
+    }
+
+    tcp_payload_len = ip_total_len - sizeof(struct rte_ipv4_hdr) - tcp_hdr_len;
+    flags = tcp_hdr->tcp_flags;
+
+    if (tcp_payload_len == 0 &&
+        (flags & DPDK_TCP_FLAG_ACK) &&
+        !(flags & (DPDK_TCP_FLAG_SYN | DPDK_TCP_FLAG_FIN | DPDK_TCP_FLAG_RST | DPDK_TCP_FLAG_PSH | DPDK_TCP_FLAG_URG))) {
+        return 1;
+    }
+
+    return 0;
+}
+
 static int dpdk_should_log_now(uint64_t *last_tsc, uint64_t interval_tsc)
 {
     uint64_t now;
@@ -189,7 +236,7 @@ int dpdk_net_init(int argc, char **argv, uint16_t port_id, const char *ip_addr, 
     g_dpdk_state->port_id = port_id;
     g_dpdk_state->next_fd = 100; /* Start from 100 to avoid conflicts */
     g_dpdk_state->debug = debug;
-    g_dpdk_state->packet_dump = (debug > 0); /* Enable packet dump if debug enabled */
+    g_dpdk_state->packet_dump = (debug > 1); /* Enable packet dump only for higher debug levels */
     g_dpdk_state->fast_path_enabled = 1;
     g_dpdk_state->fast_path_running = 0;
     g_dpdk_state->fast_path_rx_started = 0;
@@ -1403,12 +1450,22 @@ int dpdk_rx_burst(uint16_t port_id)
                     uint32_t pkt_seq = rte_be_to_cpu_32(payload_tcp_hdr->sent_seq);
                     uint32_t ack_advance = (uint32_t)payload_len;
                     uint32_t candidate_ack;
+                    uint8_t tcp_flags = payload_tcp_hdr->tcp_flags;
+                    int force_ack = 0;
+                    uint64_t now_tsc;
+                    uint64_t ack_interval_tsc;
+                    uint32_t ack_delta;
 
-                    if (payload_tcp_hdr->tcp_flags & DPDK_TCP_FLAG_SYN) {
+                    if (tcp_flags & DPDK_TCP_FLAG_SYN) {
                         ack_advance += 1;
+                        force_ack = 1;
                     }
-                    if (payload_tcp_hdr->tcp_flags & DPDK_TCP_FLAG_FIN) {
+                    if (tcp_flags & DPDK_TCP_FLAG_FIN) {
                         ack_advance += 1;
+                        force_ack = 1;
+                    }
+                    if (tcp_flags & DPDK_TCP_FLAG_RST) {
+                        force_ack = 1;
                     }
 
                     if (ack_advance > 0) {
@@ -1416,7 +1473,24 @@ int dpdk_rx_burst(uint16_t port_id)
                         if ((int32_t)(candidate_ack - conn->ack_num) > 0) {
                             conn->ack_num = candidate_ack;
                         }
-                        dpdk_send_tcp_ack(conn);
+                    }
+
+                    if ((int32_t)(conn->ack_num - conn->last_ack_sent) > 0) {
+                        now_tsc = rte_get_tsc_cycles();
+                        ack_interval_tsc = rte_get_tsc_hz() / 5000; /* ~200us */
+                        if (ack_interval_tsc == 0) {
+                            ack_interval_tsc = 1;
+                        }
+
+                        ack_delta = conn->ack_num - conn->last_ack_sent;
+                        if (force_ack ||
+                            ack_delta >= (16U * 1460U) ||
+                            conn->last_ack_tsc == 0 ||
+                            (now_tsc - conn->last_ack_tsc) >= ack_interval_tsc) {
+                            dpdk_send_tcp_ack(conn);
+                            conn->last_ack_sent = conn->ack_num;
+                            conn->last_ack_tsc = now_tsc;
+                        }
                     }
                 }
 
@@ -1542,11 +1616,11 @@ int dpdk_tx_burst(uint16_t port_id)
             }
         }
 
-        /* Dump packets if debug enabled (only control packets, not bulk data) */
+        /* Dump packets if debug enabled (only selected control packets, not pure ACK flood) */
         if (g_dpdk_state->packet_dump) {
             for (i = 0; i < nb_tx; i++) {
-                /* Only dump small control packets (< 100 bytes) to avoid performance impact */
-                if (rte_pktmbuf_pkt_len(bufs[i]) < 100) {
+                /* Only dump small control packets and skip TCP ACK-only packets */
+                if (rte_pktmbuf_pkt_len(bufs[i]) < 100 && !dpdk_is_tcp_ack_only_packet(bufs[i])) {
                     dpdk_dump_packet("TX", bufs[i]);
                 }
             }

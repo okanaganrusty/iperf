@@ -68,6 +68,8 @@ struct dpdk_connection {
     /* TCP state */
     uint32_t seq_num;                /* Sequence number */
     uint32_t ack_num;                /* Acknowledgment number */
+    uint32_t last_ack_sent;          /* Last ACK value transmitted */
+    uint64_t last_ack_tsc;           /* TSC at last ACK transmission */
     uint16_t window_size;            /* Window size */
 
     /* Transmit and receive buffers */
